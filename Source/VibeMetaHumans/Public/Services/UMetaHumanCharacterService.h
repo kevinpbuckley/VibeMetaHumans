@@ -249,17 +249,25 @@ public:
 	 * PipelineType: Cinematic | Optimized | UEFN. Quality: Low | Medium | High | Cinematic (Optimized/UEFN only).
 	 * BuildPath: content folder root (default /Game/MetaHumans); NameOverride: folder/asset name instead of the character name.
 	 * Returns the Blueprints found under the output folder.
+	 *
+	 * A rebuild REGENERATES an existing BP_<Name>: components added since the last build (garments, props, a speaker)
+	 * are dropped and edited properties (Body mesh, Face anim class, override materials, tags) reset. With
+	 * bPreserveBlueprintCustomization every Blueprint already in the output folder is snapshotted first and restored
+	 * after (MetaHumanWardrobeService.restore_blueprint_components): missing components re-created, recorded values
+	 * re-applied; the report is in "preserved". Asset-level edits (groom LODs, material tweaks on built assets, an
+	 * edited built body) are NOT covered: they are overwritten by the build.
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Character")
-	static FString Build(const FString& CharacterPath, const FString& PipelineType, const FString& Quality, const FString& BuildPath, const FString& NameOverride);
+	static FString Build(const FString& CharacterPath, const FString& PipelineType, const FString& Quality, const FString& BuildPath, const FString& NameOverride, bool bPreserveBlueprintCustomization = false);
 
 	/**
 	 * Queue a build() on a later editor tick and return at once (status queued). Why: a 4-5 minute blocking build
 	 * made the MCP client time out and drop the session's Unreal tools (2026-10-06). The build itself still blocks
 	 * the game thread for several minutes once it starts - poll get_build_status rather than waiting on this call.
+	 * bPreserveBlueprintCustomization: as for build().
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Character")
-	static FString BuildAsync(const FString& CharacterPath, const FString& PipelineType, const FString& Quality, const FString& BuildPath, const FString& NameOverride);
+	static FString BuildAsync(const FString& CharacterPath, const FString& PipelineType, const FString& Quality, const FString& BuildPath, const FString& NameOverride, bool bPreserveBlueprintCustomization = false);
 
 	/** status (queued|running|done|failed) / seconds / blueprints / output_folder / error for the character's last (or in-flight) build_async. */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Character")
@@ -351,11 +359,17 @@ public:
 
 	/**
 	 * Add a SkeletalMeshComponent to a Blueprint under a parent component (a built MetaHuman's "Body"), set its mesh,
-	 * drive it from the parent's pose (Leader Pose Component) and compile: how an accessory rigged to the MetaHuman
-	 * skeleton (hair, horns, armour) is put on the character.
+	 * drive it from the parent's pose (Leader Pose Component) and compile: how a garment or accessory rigged to the
+	 * MetaHuman skeleton (a Fab jacket, hair, armour) is put on the character.
+	 *
+	 * With leader pose the component also uses the leader's bounds (without it a garment is frustum-culled in close-ups:
+	 * its own bounds sit at the rest pose) and only ticks its pose when rendered. OverrideMaterials: one material path
+	 * or a JSON array, one per slot ("" keeps a slot's own). The result's "follower_check" counts the garment's
+	 * vertices weighted to bones the parent does not evaluate (they collapse to the actor origin: spikes from the cuffs
+	 * to the floor; fix a copy with MetaHumanWardrobeService.fix_unevaluated_bone_weights) and to bones it lacks.
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Character")
-	static FString AttachSkeletalMeshToBlueprint(const FString& BlueprintPath, const FString& ComponentName, const FString& SkeletalMeshPath, const FString& ParentComponentName = TEXT("Body"), bool bLeaderPose = true);
+	static FString AttachSkeletalMeshToBlueprint(const FString& BlueprintPath, const FString& ComponentName, const FString& SkeletalMeshPath, const FString& ParentComponentName = TEXT("Body"), bool bLeaderPose = true, const FString& OverrideMaterials = TEXT(""));
 
 	/**
 	 * Add a StaticMeshComponent to a Blueprint under a parent component, attached to one of its bone sockets ("head" on a

@@ -1,10 +1,11 @@
 ---
 name: metahuman
 display_name: MetaHumans with VibeMetaHumans
-description: Create, edit, rig, animate and place MetaHumans in Unreal Engine 5.9 through the VibeMetaHumans services (unreal.MetaHumanCharacterService, MetaHumanAnimatorService, MetaHumanIdentityService, MetaHumanLiveLinkService, MetaHumanSetupService, MetaHumanObjectService). Use for any MetaHuman task - new character, body/skin/eyes/hair changes, facial animation from webcam video, iPhone Live Link Face takes or audio, real-time Live Link, assembly into a Blueprint.
+description: Create, edit, rig, animate, dress and place MetaHumans in Unreal Engine 5.9 through the VibeMetaHumans services (unreal.MetaHumanCharacterService, MetaHumanWardrobeService, MetaHumanAnimatorService, MetaHumanIdentityService, MetaHumanLiveLinkService, MetaHumanSetupService, MetaHumanObjectService). Use for any MetaHuman task - new character, body/skin/eyes/hair changes, clothes on a built character, facial animation from webcam video, iPhone Live Link Face takes or audio, real-time Live Link, assembly into a Blueprint.
 vibeue_classes:
   - MetaHumanSetupService
   - MetaHumanCharacterService
+  - MetaHumanWardrobeService
   - MetaHumanAnimatorService
   - MetaHumanIdentityService
   - MetaHumanLiveLinkService
@@ -49,7 +50,8 @@ s = json.loads(unreal.MetaHumanSetupService.get_status())
 | Task | Load this skill (`GetSkills`) | Service |
 |---|---|---|
 | Environment, what exists, enum names, open an asset editor | `/Skills/VibeMetaHumans/metahuman-setup` | `MetaHumanSetupService` |
-| Make or change a character (body, skin, eyes, makeup, teeth, lashes, hair, clothes), rig it, build the Blueprint, place it | `/Skills/VibeMetaHumans/metahuman-creator` | `MetaHumanCharacterService` |
+| Make or change a character (body, skin, eyes, makeup, teeth, lashes, hair, Creator outfits), rig it, build the Blueprint, place it | `/Skills/VibeMetaHumans/metahuman-creator` | `MetaHumanCharacterService` |
+| Dress a BUILT Blueprint in marketplace/Fab garments; poke-through, cuff spikes, necklines, keep it through a rebuild, groom LODs | `/Skills/VibeMetaHumans/metahuman-wardrobe` | `MetaHumanWardrobeService` (+ `attach_skeletal_mesh_to_blueprint`) |
 | Facial animation from a video file (webcam/DSLR), an iPhone take, or audio; export AnimSequence/LevelSequence | `/Skills/VibeMetaHumans/metahuman-animator` | `MetaHumanAnimatorService` (+ `MetaHumanIdentityService` for iPhone depth takes) |
 | Real-time face capture in the editor, calibrate, bind to a placed MetaHuman, Take Recorder | `/Skills/VibeMetaHumans/metahuman-live-link` | `MetaHumanLiveLinkService` |
 | Anything not wrapped: read/patch properties, call a Blueprint library, describe a struct | (this pack, below) | `MetaHumanObjectService` |

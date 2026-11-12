@@ -133,4 +133,17 @@ for hand animation. Import the wav first (any importer) so a SoundWave asset exi
   reports `can_process`.
 - Epic's own sample scripts use mood names like `HAPPY`; the 5.8 enum names are `Happiness`,
   `Sadness`, etc. The service accepts enum names case-insensitively.
+- **Face clips played as montages do not show on the plugin's face AnimBP.** `/MetaHumanCharacter/Face/ABP_Face`
+  is CopyPoseFromMesh only, with no Slot node, so a face AnimSequence played on a slot (`PlaySlotAnimationAsDynamicMontage`,
+  a sequencer slot track) is ignored. Use your own face AnimBP in the project: copy pose from the body, then a layered
+  blend with a `DefaultSlot`, and set it as the Face component's anim class on the built Blueprint (2026-11-12).
+- **Exported head movement snaps the head.** In `ABP_Face_PostProcess`, `HeadControlSwitch` is an on/off gate for
+  the head-movement IK (0.35 = off, no blend); when on, it snaps the head to the archetype pose (about 4.4 cm forward
+  and down on one character). Scaling HeadYaw/Pitch/Translation does not remove that offset: multiply
+  `HeadControlSwitch` by 0 in your face AnimBP, or export without head movement.
+- An AnimGraph node's `show_pin_for_properties` cannot be applied from Python (no ReconstructNode; set_editor_property
+  does not fire the PostEditChange). Use node property maps such as ModifyCurve's `curve_map`.
+- **Never duplicate an engine-plugin AnimBP into /Game as a test fixture** (e.g. `ABP_MH_LiveLink`, `ABP_Face`).
+  Deleting the copy runs ForceDeleteObjects, which cannot unload a package that references MetaHuman Control Rig
+  classes, and the editor then fatals on a `RigVMHost` cast. Build fixtures from a minimal AnimBP you create.
 - Engine-level reference: UnrealEngineSkills `ue-metahuman-animator`.

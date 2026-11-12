@@ -86,7 +86,12 @@ public class VibeMetaHumans : ModuleRules
 				"RigLogicModule",           // EDNADataLayer, DNA readers
 				"InterchangeDNA",           // a skeletal mesh from a DNA (generate_skeletal_mesh_from_dna, 2026-10-04)
 				"MaterialEditor",           // UMaterialEditingLibrary (set_material_texture)
-				"GeometryCore",             // FDynamicMesh3: the conform target rendered for face tracking
+				"GeometryCore",             // FDynamicMesh3: the conform target rendered for face tracking; AABB/winding queries (wardrobe)
+				"MeshDescription",          // wardrobe service: read/edit skeletal mesh LODs (2026-11-12)
+				"StaticMeshDescription",
+				"SkeletalMeshDescription",  // FSkeletalMeshAttributes: skin weights
+				"AnimationCore",            // UE::AnimationCore::FBoneWeight
+				"RenderCore",               // FlushRenderingCommands before a mesh LOD rebuild
 				"GeometryFramework",        // UDynamicMeshComponent
 				"HairStrandsCore",          // UGroomComponent/UGroomAsset/UGroomBindingAsset (2026-10-07 hair tools)
 				"HairStrandsEditor",        // UHairStrandsFactory (import_groom)

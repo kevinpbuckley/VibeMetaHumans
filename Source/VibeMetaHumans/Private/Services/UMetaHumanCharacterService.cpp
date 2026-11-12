@@ -82,7 +82,13 @@
 #include "Subsystem/MetaHumanCharacterBuild.h"
 #include "UObject/UnrealType.h"
 #include "Utils/VmhAssets.h"
+#include "Utils/VmhBlueprintSnapshot.h"
 #include "Utils/VmhJson.h"
+#include "Services/UMetaHumanWardrobeService.h"
+#include "FileHelpers.h"
+#include "Misc/PackageName.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "VibeMetaHumansModule.h"
 #include "FrameTrackingContourData.h"
 #include "MetaHumanFaceContourTrackerAsset.h"
@@ -1917,7 +1923,7 @@ FString UMetaHumanCharacterService::CanBuild(const FString& CharacterPath)
 	return CharacterResult(Ctx, Out);
 }
 
-FString UMetaHumanCharacterService::Build(const FString& CharacterPath, const FString& PipelineType, const FString& Quality, const FString& BuildPath, const FString& NameOverride)
+FString UMetaHumanCharacterService::Build(const FString& CharacterPath, const FString& PipelineType, const FString& Quality, const FString& BuildPath, const FString& NameOverride, bool bPreserveBlueprintCustomization)
 {
 	const UEnum* PipelineEnum = StaticEnum<EMetaHumanDefaultPipelineType>();
 	const UEnum* QualityEnum = StaticEnum<EMetaHumanQualityLevel>();
@@ -1949,12 +1955,26 @@ FString UMetaHumanCharacterService::Build(const FString& CharacterPath, const FS
 	Params.AbsoluteBuildPath = BuildPath;
 	Params.NameOverride = NameOverride;
 
+	const FString Root = BuildPath.IsEmpty() ? TEXT("/Game/MetaHumans") : BuildPath;
+	const FString Leaf = NameOverride.IsEmpty() ? Ctx.Character->GetName() : NameOverride;
+
+	// the build regenerates an existing Blueprint: record each one first when asked to keep its customization
+	TArray<TPair<FString, TSharedPtr<FJsonObject>>> Snapshots;
+	if (bPreserveBlueprintCustomization)
+	{
+		for (const FString& BlueprintPath : VmhAssets::FindAssetsOfClass(TEXT("/Script/Engine.Blueprint"), Root / Leaf))
+		{
+			if (UBlueprint* Existing = VmhAssets::Load<UBlueprint>(BlueprintPath))
+			{
+				Snapshots.Emplace(BlueprintPath, VmhBlueprintSnapshot::Take(Existing));
+			}
+		}
+	}
+
 	const double Start = FPlatformTime::Seconds();
 	Ctx.Subsystem->BuildMetaHuman(Ctx.Character, Params);
 	const double Seconds = FPlatformTime::Seconds() - Start;
 
-	const FString Root = BuildPath.IsEmpty() ? TEXT("/Game/MetaHumans") : BuildPath;
-	const FString Leaf = NameOverride.IsEmpty() ? Ctx.Character->GetName() : NameOverride;
 	TArray<FString> Blueprints = VmhAssets::FindAssetsOfClass(TEXT("/Script/Engine.Blueprint"), Root / Leaf);
 	if (Blueprints.Num() == 0)
 	{
@@ -1967,11 +1987,49 @@ FString UMetaHumanCharacterService::Build(const FString& CharacterPath, const FS
 	Out->SetStringField(TEXT("output_folder"), Root / Leaf);
 	Out->SetNumberField(TEXT("seconds"), Seconds);
 	Out->SetArrayField(TEXT("blueprints"), VmhJson::StringArray(Blueprints));
+
+	if (bPreserveBlueprintCustomization)
+	{
+		TArray<TSharedPtr<FJsonValue>> Preserved;
+		for (const TPair<FString, TSharedPtr<FJsonObject>>& Snap : Snapshots)
+		{
+			UBlueprint* Rebuilt = VmhAssets::Load<UBlueprint>(Snap.Key);
+			FString RestoreError;
+			const TSharedPtr<FJsonObject> Report = Rebuilt ? VmhBlueprintSnapshot::Restore(Rebuilt, Snap.Value, VmhBlueprintSnapshot::FRestoreOptions(), RestoreError) : nullptr;
+			if (Report.IsValid())
+			{
+				Preserved.Add(MakeShared<FJsonValueObject>(Report));
+			}
+			else
+			{
+				Preserved.Add(MakeShared<FJsonValueString>(Snap.Key + TEXT(": ") + (Rebuilt ? RestoreError : TEXT("no Blueprint at this path after the build"))));
+			}
+		}
+		Out->SetArrayField(TEXT("preserved"), Preserved);
+	}
+
+	// a build leaves dirty T_PreBakedGroom_* packages that were never written to disk; saving them fails (2026-11-12)
+	TArray<UPackage*> Dirty;
+	FEditorFileUtils::GetDirtyContentPackages(Dirty);
+	TArray<FString> Ghosts;
+	for (const UPackage* Package : Dirty)
+	{
+		const FString Name = Package ? Package->GetName() : FString();
+		if (Name.StartsWith(Root / Leaf) && Name.Contains(TEXT("T_PreBakedGroom")) && !FPackageName::DoesPackageExist(Name))
+		{
+			Ghosts.Add(Name);
+		}
+	}
+	if (Ghosts.Num() > 0)
+	{
+		Out->SetArrayField(TEXT("unsaved_ghost_packages"), VmhJson::StringArray(Ghosts));
+		Out->SetStringField(TEXT("ghost_hint"), TEXT("leave these unsaved (their save fails): they clear on a level change plus garbage collection; save the other dirty packages by name"));
+	}
 	Out->SetStringField(TEXT("hint"), TEXT("Place the Blueprint in a level; its Live Link / animation inputs are on the actor. Save all packages afterwards."));
 	return CharacterResult(Ctx, Out);
 }
 
-FString UMetaHumanCharacterService::BuildAsync(const FString& CharacterPath, const FString& PipelineType, const FString& Quality, const FString& BuildPath, const FString& NameOverride)
+FString UMetaHumanCharacterService::BuildAsync(const FString& CharacterPath, const FString& PipelineType, const FString& Quality, const FString& BuildPath, const FString& NameOverride, bool bPreserveBlueprintCustomization)
 {
 	// validate up front, exactly like build(), so a bad request fails now rather than on the deferred tick
 	const UEnum* PipelineEnum = StaticEnum<EMetaHumanDefaultPipelineType>();
@@ -2013,7 +2071,7 @@ FString UMetaHumanCharacterService::BuildAsync(const FString& CharacterPath, con
 	State.OutputFolder = BuildPath.IsEmpty() ? TEXT("/Game/MetaHumans") : BuildPath;
 
 	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
-		[Path, PipelineType, Quality, BuildPath, NameOverride](float) -> bool
+		[Path, PipelineType, Quality, BuildPath, NameOverride, bPreserveBlueprintCustomization](float) -> bool
 		{
 			FBuildAsyncState* S = GPendingBuilds.Find(Path);
 			if (!S)
@@ -2022,7 +2080,7 @@ FString UMetaHumanCharacterService::BuildAsync(const FString& CharacterPath, con
 			}
 			S->Status = TEXT("running");
 			const double Start = FPlatformTime::Seconds();
-			const FString Result = UMetaHumanCharacterService::Build(Path, PipelineType, Quality, BuildPath, NameOverride);
+			const FString Result = UMetaHumanCharacterService::Build(Path, PipelineType, Quality, BuildPath, NameOverride, bPreserveBlueprintCustomization);
 			S = GPendingBuilds.Find(Path); // the map may have grown during the build (another character's request)
 			if (!S)
 			{
@@ -3089,7 +3147,7 @@ FString UMetaHumanCharacterService::SetMaterialTexture(const FString& MaterialIn
 	return bApplied ? VmhJson::Ok(Out) : VmhJson::Error(TEXT("SET_FAILED"), TEXT("the parameter does not read back as the texture after setting it"), Out);
 }
 
-FString UMetaHumanCharacterService::AttachSkeletalMeshToBlueprint(const FString& BlueprintPath, const FString& ComponentName, const FString& SkeletalMeshPath, const FString& ParentComponentName, bool bLeaderPose)
+FString UMetaHumanCharacterService::AttachSkeletalMeshToBlueprint(const FString& BlueprintPath, const FString& ComponentName, const FString& SkeletalMeshPath, const FString& ParentComponentName, bool bLeaderPose, const FString& OverrideMaterials)
 {
 	UBlueprint* Blueprint = VmhAssets::Load<UBlueprint>(BlueprintPath);
 	if (!Blueprint || !Blueprint->SimpleConstructionScript)
@@ -3104,6 +3162,35 @@ FString UMetaHumanCharacterService::AttachSkeletalMeshToBlueprint(const FString&
 	if (ComponentName.IsEmpty())
 	{
 		return VmhJson::Error(TEXT("BAD_ARGS"), TEXT("ComponentName is required"));
+	}
+	// override materials: one path, or a JSON array with one entry per slot ("" keeps the slot's own)
+	TArray<UMaterialInterface*> Overrides;
+	{
+		const FString Spec = OverrideMaterials.TrimStartAndEnd();
+		TArray<FString> Paths;
+		if (Spec.StartsWith(TEXT("[")))
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Spec);
+			if (!FJsonSerializer::Deserialize(Reader, Values))
+			{
+				return VmhJson::Error(TEXT("BAD_ARGS"), TEXT("OverrideMaterials is a material path or a JSON array of paths"));
+			}
+			for (const TSharedPtr<FJsonValue>& V : Values) { Paths.Add(V->AsString()); }
+		}
+		else if (!Spec.IsEmpty())
+		{
+			Paths.Add(Spec);
+		}
+		for (const FString& P : Paths)
+		{
+			UMaterialInterface* Material = P.IsEmpty() ? nullptr : VmhAssets::Load<UMaterialInterface>(P);
+			if (!P.IsEmpty() && !Material)
+			{
+				return VmhJson::Error(TEXT("MATERIAL_NOT_FOUND"), FString::Printf(TEXT("No material at %s"), *P));
+			}
+			Overrides.Add(Material);
+		}
 	}
 	USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
 	USCS_Node* Parent = nullptr;
@@ -3128,7 +3215,16 @@ FString UMetaHumanCharacterService::AttachSkeletalMeshToBlueprint(const FString&
 		return VmhJson::Error(TEXT("NODE_FAILED"), TEXT("the construction script made no SkeletalMeshComponent template"));
 	}
 	Template->SetSkeletalMeshAsset(Mesh);
+	for (int32 Slot = 0; Slot < Overrides.Num(); ++Slot)
+	{
+		if (Overrides[Slot])
+		{
+			if (Template->OverrideMaterials.Num() <= Slot) { Template->OverrideMaterials.SetNum(Slot + 1); }
+			Template->OverrideMaterials[Slot] = Overrides[Slot];
+		}
+	}
 	bool bLeader = false;
+	USkeletalMesh* LeaderMesh = nullptr;
 	if (Parent)
 	{
 		Parent->AddChildNode(Node);
@@ -3137,6 +3233,10 @@ FString UMetaHumanCharacterService::AttachSkeletalMeshToBlueprint(const FString&
 			if (USkinnedMeshComponent* ParentTemplate = Cast<USkinnedMeshComponent>(Parent->ComponentTemplate))
 			{
 				Template->LeaderPoseComponent = ParentTemplate;
+				// the follower's own bounds stay at its rest pose: without the leader's bounds it is culled in close-ups (2026-11-12)
+				Template->bUseBoundsFromLeaderPoseComponent = true;
+				Template->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+				LeaderMesh = Cast<USkeletalMesh>(ParentTemplate->GetSkinnedAsset());
 				bLeader = true;
 			}
 		}
@@ -3155,9 +3255,27 @@ FString UMetaHumanCharacterService::AttachSkeletalMeshToBlueprint(const FString&
 	Out->SetStringField(TEXT("parent"), Parent ? ParentComponentName : TEXT(""));
 	Out->SetStringField(TEXT("skeletal_mesh"), Mesh->GetPathName());
 	Out->SetBoolField(TEXT("leader_pose"), bLeader);
+	Out->SetBoolField(TEXT("use_bounds_from_leader"), bLeader);
+	Out->SetNumberField(TEXT("override_materials"), Overrides.Num());
 	Out->SetBoolField(TEXT("compiled"), Blueprint->Status != BS_Error);
 	Out->SetStringField(TEXT("skeleton"), Mesh->GetSkeleton() ? Mesh->GetSkeleton()->GetPathName() : TEXT(""));
-	Out->SetStringField(TEXT("hint"), TEXT("the mesh follows the parent only when it shares the parent's skeleton (import the accessory FBX onto the MetaHuman body skeleton); save the Blueprint's package when it should stay"));
+	TArray<FString> Warnings;
+	if (LeaderMesh)
+	{
+		const TSharedPtr<FJsonObject> Check = UMetaHumanWardrobeService::CheckFollower(Mesh, LeaderMesh, 0);
+		Out->SetObjectField(TEXT("follower_check"), Check);
+		double Dead = 0, Missing = 0;
+		if (Check->TryGetNumberField(TEXT("unevaluated_bone_vertices"), Dead) && Dead > 0)
+		{
+			Warnings.Add(FString::Printf(TEXT("%d vertices are weighted to bones %s does not evaluate: they will collapse to the actor origin (spikes). Fix a copy: MetaHumanWardrobeService.fix_unevaluated_bone_weights(<copy>, %s)"), static_cast<int32>(Dead), *LeaderMesh->GetName(), *LeaderMesh->GetPathName()));
+		}
+		if (Check->TryGetNumberField(TEXT("missing_bone_vertices"), Missing) && Missing > 0)
+		{
+			Warnings.Add(FString::Printf(TEXT("%d vertices are weighted to bones %s lacks: they will not follow the body"), static_cast<int32>(Missing), *LeaderMesh->GetName()));
+		}
+	}
+	Out->SetArrayField(TEXT("warnings"), VmhJson::StringArray(Warnings));
+	Out->SetStringField(TEXT("hint"), TEXT("the mesh follows the parent only when it shares the parent's skeleton; a marketplace garment keeps its modelled size (no refit). Hide the built default outfit component if it shows through. Save the Blueprint's package when it should stay"));
 	return VmhJson::Ok(Out);
 }
 

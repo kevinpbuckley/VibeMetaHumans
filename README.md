@@ -19,6 +19,7 @@ It covers the four workflows of the in-editor MetaHuman pipeline:
 | Create & edit a character (MetaHuman Creator) | `MetaHumanCharacterService` | create from the blank template or a preset, body shape/type (`set_body_constraints` activates the measurements you name - `only_named` to switch off the rest - and returns before/after/delta for every one), skin tone, eyes, makeup, teeth/eyelashes, face coefficients, sculpt-landmark fitting to a reference picture (`get_face_landmarks` / `move_face_landmarks`, with ear/neck/skull detection and groom/rig refusals), Mesh-to-MetaHuman imports (Identity / DNA / template meshes), cloud auto-rig + high-res textures (`get_auto_rig_status`), wardrobe (hair, brows, lashes, beard, outfits), non-blocking build and save (`build_async`/`get_build_status`, `save_deferred`/`get_save_status` - `save` routes to it automatically while an edit session is open), spawn in the level, DNA export |
 | **Custom mesh to MetaHuman** (UE 5.9's Import > from custom mesh, headless) | `MetaHumanCharacterService` | `import_from_custom_mesh` (face landmarks tracked on a front-on render, auto solve), `save_posed_dna` (the solved body in the mesh's pose: the baking target), `commit_a_pose`, `generate_skeletal_mesh_from_dna`; round trips with a DCC: `export_fbx`, `import_texture` (verifies it actually built, not a 32x32 placeholder), `reimport_skeletal_mesh` (replace in place, materials restored by slot name), `set_material_texture`, `attach_skeletal_mesh_to_blueprint` / `attach_static_mesh_to_blueprint` / `remove_component_from_blueprint` |
 | **Hair on a built MetaHuman** (2026-10-07) | `MetaHumanCharacterService` | `list_wardrobe_items` (every groom Wardrobe Item by slot), `add_groom_to_blueprint` (a GroomComponent on a built Blueprint, the plugin's binding duplicated and retargeted onto the built face, material overrides copied from an existing groom component), `import_groom` (a custom Alembic groom) |
+| **Dress a built MetaHuman** (2026-11-12) | `MetaHumanWardrobeService` | marketplace/Fab skeletal garments on a built Blueprint without a rebuild: `fix_unevaluated_bone_weights` (the cuff spikes), `make_full_body_from_dna` (the built body's missing skin back, for dresses and open collars), `hide_body_under_garments` (skin under the clothes deleted, rest + seated poses), `push_garment_out_of_mesh` (a neckline out over the face mesh's neck skirt), `snapshot_blueprint_components` / `restore_blueprint_components` (survive a rebuild; also `build(..., True)`), `fill_groom_lods` (no bald LODs). All computed from asset data: no level, actor or PIE |
 | Facial animation from **webcam / DSLR video** | `MetaHumanAnimatorService` | ingest a video file → Footage Capture Data → MonoFootage Performance → process → AnimSequence / LevelSequence |
 | Facial animation from an **iPhone** (Live Link Face) | `MetaHumanIdentityService` + `MetaHumanAnimatorService` | ingest the take, build and auto-rig an Identity from a neutral frame, process a DepthFootage Performance |
 | Facial animation from **audio only** | `MetaHumanAnimatorService` | SoundWave → Audio Performance with mood controls → process → export |
@@ -51,7 +52,7 @@ Every tool returns a JSON string: `{"success": true, ...}` or
    project's `.uproject`, and build the editor target (in Proteus: `BuildAndLaunchGame.ps1`, which is
    also copied here). The plugin is `EnabledByDefault: false` so an unbuilt checkout never
    triggers the "missing modules" dialog.
-4. Verify in the editor console: `VibeMetaHumans.ListToolsets` (expect 6 toolsets) and from the
+4. Verify in the editor console: `VibeMetaHumans.ListToolsets` (expect 7 toolsets) and from the
    agent: `unreal.MetaHumanSetupService.get_status()`.
 
 Skill packs under `Skills/` are discovered natively by UE 5.9 (`<Plugin>/Skills/**/SKILL.md`) and
@@ -122,6 +123,14 @@ await call_tool(PERF + ".ProcessPerformance", performance=p, params={})
 ll.add_video_source("", "Webcam", -1); ll.capture_neutrals("Webcam")
 ll.bind_subject_to_actor("BP_MH_Hero", "Webcam", True)
 ll.start_take_recording(["Webcam"]); ...; ll.stop_take_recording()
+
+# 6. A Fab jacket on the built character (on copies; see the metahuman-wardrobe skill)
+wd, BP = unreal.MetaHumanWardrobeService, b["blueprints"][0]
+body = "/Game/MetaHumans/MH_Hero/Body/SKM_MH_Hero_BodyMesh"
+wd.fix_unevaluated_bone_weights("/Game/Wardrobe/SKM_Jacket", body, False)            # no spikes from the cuffs
+r = json.loads(mh.attach_skeletal_mesh_to_blueprint(BP, "G_Jacket", "/Game/Wardrobe/SKM_Jacket", "Body", True, "/Game/Wardrobe/M_Jacket"))
+wd.hide_body_under_garments(BP, '["G_Jacket"]', body + "_Dressed", "{}", True, False) # no skin through the cloth
+mh.build(c, "Cinematic", "Cinematic", "/Game/MetaHumans", "", True)                  # rebuild keeps the jacket
 ```
 
 Through the MCP endpoint the same tools appear as `VibeMetaHumans.MetaHumanCharacterService.CreateCharacter`
@@ -139,9 +148,11 @@ VibeMetaHumans/
 │   ├── Private/Services/U*Service.cpp
 │   ├── Public|Private/Utils/VmhJson.*   # JSON results, struct<->JSON, property patching, reflection calls
 │   ├── Public|Private/Utils/VmhAssets.* # load/create/save assets, find actors
+│   ├── Public|Private/Utils/VmhSkin.*   # CPU skinning from mesh descriptions, AnimSequence poses, AABB/winding queries
+│   ├── Public|Private/Utils/VmhBlueprintSnapshot.* # record / restore a Blueprint's components around a rebuild
 │   └── VibeMetaHumansModule.*           # reflection-based toolset registration, console commands
 ├── Content/Python/vibemetahumans.py     # agent helpers (status, toolset discovery)
-└── Skills/<pack>/SKILL.md               # metahuman (router), -setup, -creator, -animator, -live-link (native 5.9 discovery)
+└── Skills/<pack>/SKILL.md               # metahuman (router), -setup, -creator, -wardrobe, -animator, -live-link (native 5.9 discovery)
 ```
 
 Design notes:

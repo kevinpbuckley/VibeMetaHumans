@@ -454,6 +454,24 @@ mh.save(c); mh.end_edit(c)
 - Without the optional content `add_wardrobe_item` has nothing to add and `create_character` with a
   preset path fails with `PRESET_NOT_FOUND`; create from the blank template and say why.
 - A build can take a minute or more (texture bakes, groom bindings). Do not call it in a loop.
+- A REbuild regenerates `BP_<Name>`: components added since (garments, props, a speaker component) are dropped
+  and edited properties reset (Body mesh, Face anim class, overrides, tags), and it rewrites the built meshes,
+  grooms and materials (brow/moustache opacity fixes, groom LOD fills, edited hair cards are lost). Pass the last
+  argument `True` to `build` / `build_async` to snapshot and restore every Blueprint in the output folder
+  (report in `preserved`); asset-level edits still have to be redone (`metahuman-wardrobe`).
+- A build leaves a few dirty `T_PreBakedGroom_*` packages that were never written to disk; saving them fails.
+  `build` lists them in `unsaved_ghost_packages`: save the other packages by name, and the ghosts clear on a level
+  change plus garbage collection.
+- `spawn_in_level` dirties the current map, and a scene capture made in the SAME call as the spawn comes back
+  empty: capture in a later call, then destroy the preview and reload the map (discard) before anything that refuses
+  a dirty map. Spawn it away from other characters standing at the origin.
+- A `SCS_BASE_COLOR` scene capture is written with alpha 0: it looks pure white in image viewers although the RGB
+  is fine (drop the alpha before looking).
+- Preset skin texture indices are readable without opening an edit session:
+  `MetaHumanObjectService.get_properties(preset_path, ["SkinSettings"])`.
+- Clothes for a BUILT character (Fab skeletal garments, poke-through, necklines, rebuild survival) are the
+  `metahuman-wardrobe` pack; `attach_skeletal_mesh_to_blueprint` now sets the leader's bounds and reports
+  garment vertices weighted to bones the body does not evaluate (`follower_check`).
 - The Live Link / Animator inputs live on the **built** Blueprint, not on the preview actor.
 - Read the engine-level reference skill `ue-metahuman-creator` (UnrealEngineSkills) when you need
   struct field semantics, pipeline internals or C++, and `ue-hair-and-grooms` for groom assets, Alembic
