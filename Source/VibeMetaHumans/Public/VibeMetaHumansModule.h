@@ -22,7 +22,7 @@ public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 
-	/** Register this module's service toolsets with UE 5.8's ToolsetRegistry. */
+	/** Register this module's service toolsets with UE 5.9's ToolsetRegistry. */
 	void RegisterToolsets();
 	/** Unregister this module's service toolsets. */
 	void UnregisterToolsets();

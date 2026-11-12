@@ -61,7 +61,7 @@ public class VibeMetaHumans : ModuleRules
 				"MovieSceneTracks",
 				"LevelSequence",
 
-				// UE 5.8 native AI toolset registry — exposes services as AICallable tools on Epic's MCP endpoint
+				// UE 5.9 native AI toolset registry — exposes services as AICallable tools on Epic's MCP endpoint
 				"ToolsetRegistry",
 				"ModelContextProtocol",
 

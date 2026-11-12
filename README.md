@@ -1,8 +1,8 @@
-# VibeMetaHumans — AI Editor Toolset for MetaHumans (Unreal Engine 5.8)
+# VibeMetaHumans — AI Editor Toolset for MetaHumans (Unreal Engine 5.9)
 
 VibeMetaHumans is a sibling of [VibeUE](https://github.com/kevinpbuckley/VibeUE) that focuses on one
 thing: letting an MCP agent (Claude Code, Cursor, Copilot, …) **create, edit, rig, animate and
-place MetaHumans** inside the Unreal Editor. It plugs into Unreal 5.8's native
+place MetaHumans** inside the Unreal Editor. It plugs into Unreal 5.9's native
 `ToolsetRegistry` + `ModelContextProtocol` server exactly like VibeUE does: no separate server,
 no API key, no in-editor chat. Every tool is also a plain `unreal.<Service>.<tool>()` call in
 editor Python.
@@ -12,7 +12,7 @@ It covers the four workflows of the in-editor MetaHuman pipeline:
 | Workflow | Service | What it does |
 |---|---|---|
 | Create & edit a character (MetaHuman Creator) | `MetaHumanCharacterService` | create from the blank template or a preset, body shape/type (`set_body_constraints` activates the measurements you name - `only_named` to switch off the rest - and returns before/after/delta for every one), skin tone, eyes, makeup, teeth/eyelashes, face coefficients, sculpt-landmark fitting to a reference picture (`get_face_landmarks` / `move_face_landmarks`, with ear/neck/skull detection and groom/rig refusals), Mesh-to-MetaHuman imports (Identity / DNA / template meshes), cloud auto-rig + high-res textures (`get_auto_rig_status`), wardrobe (hair, brows, lashes, beard, outfits), non-blocking build and save (`build_async`/`get_build_status`, `save_deferred`/`get_save_status` - `save` routes to it automatically while an edit session is open), spawn in the level, DNA export |
-| **Custom mesh to MetaHuman** (UE 5.8's Import > from custom mesh, headless) | `MetaHumanCharacterService` | `import_from_custom_mesh` (face landmarks tracked on a front-on render, auto solve), `save_posed_dna` (the solved body in the mesh's pose: the baking target), `commit_a_pose`, `generate_skeletal_mesh_from_dna`; round trips with a DCC: `export_fbx`, `import_texture` (verifies it actually built, not a 32x32 placeholder), `reimport_skeletal_mesh` (replace in place, materials restored by slot name), `set_material_texture`, `attach_skeletal_mesh_to_blueprint` / `attach_static_mesh_to_blueprint` / `remove_component_from_blueprint` |
+| **Custom mesh to MetaHuman** (UE 5.9's Import > from custom mesh, headless) | `MetaHumanCharacterService` | `import_from_custom_mesh` (face landmarks tracked on a front-on render, auto solve), `save_posed_dna` (the solved body in the mesh's pose: the baking target), `commit_a_pose`, `generate_skeletal_mesh_from_dna`; round trips with a DCC: `export_fbx`, `import_texture` (verifies it actually built, not a 32x32 placeholder), `reimport_skeletal_mesh` (replace in place, materials restored by slot name), `set_material_texture`, `attach_skeletal_mesh_to_blueprint` / `attach_static_mesh_to_blueprint` / `remove_component_from_blueprint` |
 | **Hair on a built MetaHuman** (2026-10-07) | `MetaHumanCharacterService` | `list_wardrobe_items` (every groom Wardrobe Item by slot), `add_groom_to_blueprint` (a GroomComponent on a built Blueprint, the plugin's binding duplicated and retargeted onto the built face, material overrides copied from an existing groom component), `import_groom` (a custom Alembic groom) |
 | Facial animation from **webcam / DSLR video** | `MetaHumanAnimatorService` | ingest a video file → Footage Capture Data → MonoFootage Performance → process → AnimSequence / LevelSequence |
 | Facial animation from an **iPhone** (Live Link Face) | `MetaHumanIdentityService` + `MetaHumanAnimatorService` | ingest the take, build and auto-rig an Identity from a neutral frame, process a DepthFootage Performance |
@@ -25,7 +25,7 @@ Every tool returns a JSON string: `{"success": true, ...}` or
 `{"success": false, "error_code": "...", "error": "..."}`.
 
 > **Optional content.** MetaHuman Creator needs the **"MetaHuman Creator Core Data"** install
-> option from the Epic Games Launcher (Library → Unreal Engine 5.8 → Options). Without it there are
+> option from the Epic Games Launcher (Library → Unreal Engine 5.9 → Options). Without it there are
 > no presets, no texture synthesis and no wardrobe library; `get_status()` reports
 > `optional_content_installed`. Cloud steps (auto-rig, high-resolution textures) need an Epic account
 > signed in to the MetaHuman service.

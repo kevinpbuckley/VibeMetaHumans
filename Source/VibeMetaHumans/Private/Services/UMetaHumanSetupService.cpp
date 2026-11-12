@@ -83,7 +83,7 @@ FString UMetaHumanSetupService::GetStatus()
 	if (!bOptional)
 	{
 		Out->SetStringField(TEXT("optional_content_hint"),
-			TEXT("Install 'MetaHuman Creator Core Data' from the Epic Games Launcher (Library > Unreal Engine 5.8 > Options). "
+			TEXT("Install 'MetaHuman Creator Core Data' from the Epic Games Launcher (Library > Unreal Engine 5.9 > Options). "
 			     "Without it there are no presets, no texture synthesis and no wardrobe library; create_character still works from the blank template."));
 	}
 	if (const TSharedPtr<IPlugin> MHC = IPluginManager::Get().FindPlugin(TEXT("MetaHumanCharacter")))

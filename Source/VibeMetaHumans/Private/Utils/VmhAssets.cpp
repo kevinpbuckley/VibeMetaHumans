@@ -65,7 +65,7 @@ namespace VmhAssets
 			{
 				if (Obj->IsAsset()) { Inner = Obj; return false; }
 				return true;
-			}, /*bIncludeNestedObjects*/ false);
+			}, EGetObjectsFlags::None);
 			return Inner;
 		}
 		return Raw;

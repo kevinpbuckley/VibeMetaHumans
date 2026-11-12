@@ -1,7 +1,7 @@
 ---
 name: metahuman
 display_name: MetaHumans with VibeMetaHumans
-description: Create, edit, rig, animate and place MetaHumans in Unreal Engine 5.8 through the VibeMetaHumans services (unreal.MetaHumanCharacterService, MetaHumanAnimatorService, MetaHumanIdentityService, MetaHumanLiveLinkService, MetaHumanSetupService, MetaHumanObjectService). Use for any MetaHuman task - new character, body/skin/eyes/hair changes, facial animation from webcam video, iPhone Live Link Face takes or audio, real-time Live Link, assembly into a Blueprint.
+description: Create, edit, rig, animate and place MetaHumans in Unreal Engine 5.9 through the VibeMetaHumans services (unreal.MetaHumanCharacterService, MetaHumanAnimatorService, MetaHumanIdentityService, MetaHumanLiveLinkService, MetaHumanSetupService, MetaHumanObjectService). Use for any MetaHuman task - new character, body/skin/eyes/hair changes, facial animation from webcam video, iPhone Live Link Face takes or audio, real-time Live Link, assembly into a Blueprint.
 vibeue_classes:
   - MetaHumanSetupService
   - MetaHumanCharacterService

@@ -1,6 +1,6 @@
 # Copyright Buckley Builds LLC 2026 All Rights Reserved.
 #
-# Registers VibeMetaHumans' markdown skill packs as native Unreal Engine 5.8 agent skills, so they
+# Registers VibeMetaHumans' markdown skill packs as native Unreal Engine 5.9 agent skills, so they
 # are discovered through Epic's own ToolsetRegistry.AgentSkillToolset (ListSkills / GetSkills) on
 # the MCP endpoint — the same single skill system the engine ships its skills through.
 #
