@@ -19,37 +19,6 @@
 #include "Utils/VibeMetaHumansPaths.h"
 #include "VibeMetaHumansModule.h"
 
-namespace
-{
-	const TCHAR* OptionalContentRoot = TEXT("/MetaHumanCharacter/Optional");
-
-	struct FKindInfo
-	{
-		const TCHAR* ClassPath;
-		const TCHAR* DefaultRoot;
-	};
-
-	bool ResolveKind(const FString& Kind, FKindInfo& Out)
-	{
-		const FString K = Kind.TrimStartAndEnd().ToLower();
-		if (K == TEXT("character"))          { Out = { TEXT("/Script/MetaHumanCharacter.MetaHumanCharacter"), TEXT("/Game") }; return true; }
-		if (K == TEXT("preset"))             { Out = { TEXT("/Script/MetaHumanCharacter.MetaHumanCharacter"), TEXT("/MetaHumanCharacter/Optional/Presets") }; return true; }
-		if (K == TEXT("identity"))           { Out = { TEXT("/Script/MetaHumanIdentity.MetaHumanIdentity"), TEXT("/Game") }; return true; }
-		if (K == TEXT("performance"))        { Out = { TEXT("/Script/MetaHumanPerformance.MetaHumanPerformance"), TEXT("/Game") }; return true; }
-		if (K == TEXT("capture_data") || K == TEXT("capturedata") || K == TEXT("footage"))
-		                                      { Out = { TEXT("/Script/CaptureDataCore.CaptureData"), TEXT("/Game") }; return true; }
-		if (K == TEXT("wardrobe"))           { Out = { TEXT("/Script/MetaHumanCharacterPalette.MetaHumanWardrobeItem"), TEXT("/MetaHumanCharacter/Optional") }; return true; }
-		if (K == TEXT("collection"))         { Out = { TEXT("/Script/MetaHumanCharacterPalette.MetaHumanCollection"), TEXT("/Game") }; return true; }
-		if (K == TEXT("blueprint"))          { Out = { TEXT("/Script/Engine.Blueprint"), TEXT("/Game/MetaHumans") }; return true; }
-		if (K == TEXT("soundwave") || K == TEXT("audio"))
-		                                      { Out = { TEXT("/Script/Engine.SoundWave"), TEXT("/Game") }; return true; }
-		if (K == TEXT("animation") || K == TEXT("anim_sequence"))
-		                                      { Out = { TEXT("/Script/Engine.AnimSequence"), TEXT("/Game") }; return true; }
-		if (K == TEXT("level_sequence"))     { Out = { TEXT("/Script/LevelSequence.LevelSequence"), TEXT("/Game") }; return true; }
-		return false;
-	}
-}
-
 FString UMetaHumanSetupService::GetStatus()
 {
 	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
@@ -129,46 +98,6 @@ FString UMetaHumanSetupService::GetStatus()
 	}
 
 	Out->SetStringField(TEXT("plugin_version"), FVibeMetaHumansPaths::GetPluginVersionName());
-	return VmhJson::Ok(Out);
-}
-
-FString UMetaHumanSetupService::ListAssets(const FString& Kind, const FString& SearchRoot)
-{
-	FKindInfo Info;
-	if (!ResolveKind(Kind, Info))
-	{
-		return VmhJson::Error(TEXT("UNKNOWN_KIND"),
-			TEXT("Kind must be one of: character, preset, identity, performance, capture_data, wardrobe, collection, blueprint, soundwave, animation, level_sequence"));
-	}
-	const FString Root = SearchRoot.IsEmpty() ? FString(Info.DefaultRoot) : SearchRoot;
-	const TArray<FString> Assets = VmhAssets::FindAssetsOfClass(Info.ClassPath, Root);
-
-	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
-	Out->SetStringField(TEXT("kind"), Kind);
-	Out->SetStringField(TEXT("search_root"), Root);
-	Out->SetNumberField(TEXT("count"), Assets.Num());
-	Out->SetArrayField(TEXT("assets"), VmhJson::StringArray(Assets));
-	if (Assets.Num() == 0 && Root.StartsWith(OptionalContentRoot) && !FMetaHumanCharacterEditorModule::IsOptionalMetaHumanContentInstalled())
-	{
-		Out->SetStringField(TEXT("hint"), TEXT("The MetaHuman optional content is not installed, so this folder is empty."));
-	}
-	return VmhJson::Ok(Out);
-}
-
-FString UMetaHumanSetupService::OpenInEditor(const FString& AssetPath)
-{
-	UObject* Asset = VmhAssets::Load(AssetPath);
-	if (!Asset)
-	{
-		return VmhJson::Error(TEXT("ASSET_NOT_FOUND"), FString::Printf(TEXT("No asset at %s"), *AssetPath));
-	}
-	if (!VmhAssets::OpenEditor(Asset))
-	{
-		return VmhJson::Error(TEXT("OPEN_FAILED"), FString::Printf(TEXT("Could not open an editor for %s"), *Asset->GetPathName()));
-	}
-	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
-	Out->SetStringField(TEXT("asset"), Asset->GetPathName());
-	Out->SetStringField(TEXT("class"), Asset->GetClass()->GetName());
 	return VmhJson::Ok(Out);
 }
 

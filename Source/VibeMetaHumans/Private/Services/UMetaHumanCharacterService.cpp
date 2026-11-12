@@ -1628,7 +1628,7 @@ FString UMetaHumanCharacterService::AddWardrobeItem(const FString& CharacterPath
 	UMetaHumanWardrobeItem* Item = VmhAssets::Load<UMetaHumanWardrobeItem>(WardrobeItemPath);
 	if (!Item)
 	{
-		return VmhJson::Error(TEXT("WARDROBE_ITEM_NOT_FOUND"), FString::Printf(TEXT("No MetaHuman Wardrobe Item at %s (use MetaHumanSetupService.list_assets('wardrobe'))"), *WardrobeItemPath));
+		return VmhJson::Error(TEXT("WARDROBE_ITEM_NOT_FOUND"), FString::Printf(TEXT("No MetaHuman Wardrobe Item at %s (use list_wardrobe_items or EditorToolset.AssetToolset.FindAssets for MetaHumanWardrobeItem)"), *WardrobeItemPath));
 	}
 	FEditContext Ctx = OpenForEdit(CharacterPath, true);
 	if (!Ctx.IsValid())

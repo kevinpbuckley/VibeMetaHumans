@@ -98,7 +98,7 @@ grooms under `/Game/MetaHumans/<Name>`.
    `select_wardrobe_item(c, "Hair", "")` clears a slot. Selecting REPLACES the slot's selection
    (`SetSingleSlotSelection`), so layering several `SkeletalMesh` pieces needs the instance's
    `try_add_slot_selection` (no service tool yet). Items come from
-   `MetaHumanSetupService.list_assets("wardrobe", "")` or `list_wardrobe_items("Hair")` (groom slots only;
+   `EditorToolset.AssetToolset.FindAssets` (filter `assetType` `/Script/MetaHumanCharacterPalette.MetaHumanWardrobeItem`, `folderPath` `/MetaHumanCharacter/Optional`, `maxResults` 0) or `list_wardrobe_items("Hair")` (groom slots only;
    see **Hair on a built MetaHuman** below for a SECOND groom layered onto a built Blueprint, and
    **Custom hair as a Creator wardrobe item** for making your own groom wearable here).
    Per-item settings - groom colour (Melanin, Redness, Roughness, Whiteness, Lightness, DyeColor, plus the Ombre,
@@ -270,7 +270,7 @@ space, copy that binding and its item, point them at the custom groom, and put t
    not), then `set_wardrobe_item_parameters` - a new groom wears the default auburn until coloured; which of the
    Ombre / Regions / Highlights groups it offers follows the copied pipeline's flags (step 5).
    `list_wardrobe_items` reads only the plugin's optional content; find project items with
-   `MetaHumanSetupService.list_assets("wardrobe", "/Game/...")`. Wardrobe changes do not need the rig removed.
+   `EditorToolset.AssetToolset.FindAssets` (wardrobe `assetType`, `folderPath` `/Game/...`). Wardrobe changes do not need the rig removed.
 9. **Strands only, so far.** A custom Alembic groom has no card or mesh LODs and no baked texture, while the copied
    pipeline keeps the library's LOD transition (strands -> cards -> ...). Only Cinematic builds and the Creator
    preview were checked: Optimized / Low builds and far LODs may show no hair. Generate cards in the groom (Hair

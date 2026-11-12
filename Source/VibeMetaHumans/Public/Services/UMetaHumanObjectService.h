@@ -59,8 +59,4 @@ public:
 	/** Describe a USTRUCT (field names, types, defaults) so an agent can build a JSON patch for it. */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Object")
 	static FString DescribeStruct(const FString& StructPath);
-
-	/** Save the package that owns an asset. */
-	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Object")
-	static FString SaveAsset(const FString& AssetPath);
 };

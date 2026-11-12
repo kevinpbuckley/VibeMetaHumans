@@ -65,9 +65,10 @@ s = json.loads(unreal.MetaHumanSetupService.get_status())
 3. **Pick the Animator route by input.** Plain video → `MonoFootage` (no identity). iPhone take in
    MetaHuman Animator mode → `DepthFootage` + a prepared Identity (best fidelity). Audio file →
    `Audio`. Never promise an identity from a webcam video: identities need depth.
-4. **Processing is blocking.** `process`, `request_auto_rig(..., True)`, `request_texture_sources`
+4. **Some calls are blocking.** `request_auto_rig(..., True)`, `request_texture_sources`
    and `build` return when done; a 30-second-timeout MCP client may abandon the call while the
-   editor keeps working. Re-query (`get_status`, `get_summary`) instead of re-running.
+   editor keeps working. Re-query (`get_status`, `get_summary`) instead of re-running. Animator
+   processing is Epic's asynchronous `ProcessPerformance` (poll `MetaHumanAnimatorService.get_status`).
 5. **Patch, don't rebuild.** Settings tools take a JSON patch; only the fields you pass change.
    When unsure of a shape: `MetaHumanObjectService.describe_struct("MetaHumanCharacterSkinSettings")`
    or `MetaHumanCharacterService.get_settings(c, "skin")`.
@@ -82,6 +83,7 @@ o = unreal.MetaHumanObjectService
 o.get_properties(perf, ["InputType", "HeadMovementMode"])
 o.set_properties(perf, '{"HeadMovementMode":"ControlRig","bSkipDiagnostics":true}')
 o.list_functions("MetaHumanCharacterEditorSubsystem", "Commit")
+# (Epic's CaptureManagerIngestTools.ScanForTakes is the AI-tool route to the same scan)
 o.call_function("CaptureManagerIngestBlueprintLibrary", "FindTakeDirectories", '{"SearchDirectory":"D:/Takes","bRecursive":true}')
 o.call_object_function(subject_settings_path, "SetSmoothing", '{"0": "/MetaHumanLiveLink/..."}')  # positional args by index
 o.describe_struct("MetaHumanCharacterEyesSettings")

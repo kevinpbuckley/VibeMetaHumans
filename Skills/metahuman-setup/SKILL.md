@@ -1,7 +1,7 @@
 ---
 name: metahuman-setup
 display_name: MetaHuman Setup and Discovery
-description: Check the MetaHuman environment (plugins, optional content, cloud login), list MetaHuman assets (characters, presets, identities, performances, capture data, wardrobe items, built Blueprints), look up enum option names and open MetaHuman asset editors with unreal.MetaHumanSetupService. Use at the start of any MetaHuman task and whenever a tool says an asset or option was not found.
+description: Check the MetaHuman environment (plugins, optional content, cloud login), look up enum option names with unreal.MetaHumanSetupService, and list MetaHuman assets (characters, presets, identities, performances, capture data, wardrobe items, built Blueprints) or open their editors through Epic AssetToolset.FindAssets / EditorAppToolset.OpenEditorForAsset. Use at the start of any MetaHuman task and whenever a tool says an asset or option was not found.
 vibeue_classes:
   - MetaHumanSetupService
 keywords:
@@ -33,12 +33,29 @@ Returns one JSON object. Fields that drive decisions:
 | `asset_counts` | characters, presets, identities, performances, capture data, wardrobe items, built MetaHuman Blueprints | zero presets with optional content installed means the asset registry has not scanned yet; call again |
 | `live_link_sources` / `live_link_subjects` | current Live Link state | – |
 
-## list_assets(kind, search_root)
+## Listing assets (Epic AssetToolset.FindAssets)
 
-`kind`: `character`, `preset`, `identity`, `performance`, `capture_data`, `wardrobe`, `collection`,
-`blueprint` (built MetaHumans under `/Game/MetaHumans`), `soundwave`, `animation`, `level_sequence`.
-`search_root` empty uses the kind's default (`/Game`, or the plugin's `Optional` folder for presets
-and wardrobe). Returns object paths you can pass straight to the other services.
+Asset discovery is Epic's `EditorToolset.AssetToolset.FindAssets` (this service no longer has `list_assets`).
+Call it with a `filter` of `{folderPath, assetType, bRecursive: true, maxResults: 0}` (`maxResults` 0 = all; the
+default caps at 100). It returns asset references you can pass straight to the other services. One call per kind:
+
+| kind | `assetType` (class path) | default `folderPath` |
+|---|---|---|
+| character | `/Script/MetaHumanCharacter.MetaHumanCharacter` | `/Game` |
+| preset | `/Script/MetaHumanCharacter.MetaHumanCharacter` | `/MetaHumanCharacter/Optional/Presets` |
+| identity | `/Script/MetaHumanIdentity.MetaHumanIdentity` | `/Game` |
+| performance | `/Script/MetaHumanPerformance.MetaHumanPerformance` | `/Game` |
+| capture_data | `/Script/CaptureDataCore.CaptureData` | `/Game` |
+| wardrobe | `/Script/MetaHumanCharacterPalette.MetaHumanWardrobeItem` | `/MetaHumanCharacter/Optional` |
+| collection | `/Script/MetaHumanCharacterPalette.MetaHumanCollection` | `/Game` |
+| blueprint (built MetaHumans) | `/Script/Engine.Blueprint` | `/Game/MetaHumans` |
+| soundwave | `/Script/Engine.SoundWave` | `/Game` |
+| animation | `/Script/Engine.AnimSequence` | `/Game` |
+| level_sequence | `/Script/LevelSequence.LevelSequence` | `/Game` |
+
+Class matching includes subclasses. An empty result under `/MetaHumanCharacter/Optional` usually means the
+optional content is not installed (see `optional_content_installed` above). For groom slots,
+`MetaHumanCharacterService.list_wardrobe_items(slot)` is the plugin-aware alternative.
 
 Wardrobe item naming (optional content): `/MetaHumanCharacter/Optional/Grooms/Bindings/<Slot>/WI_<...>`
 where `<Slot>` is `Hair`, `Eyebrows`, `Eyelashes`, `Mustaches`, `Beards`, `Peachfuzz`; clothing under
@@ -52,16 +69,17 @@ Names accepted by the other services: `body_type` (`f_med_nrw` … `m_tal_ovw`, 
 `Audio`, `MonoFootage`), `head_movement_mode`, `audio_mood`, `audio_output_controls`, plus the
 settings section names and wardrobe slot names.
 
-## open_in_editor(asset_path)
+## Opening an editor (Epic EditorAppToolset.OpenEditorForAsset)
 
-Opens the MetaHuman Character editor, Identity editor, Performance editor, etc. Use it when the user
-wants to look at a result; it is not needed for any scripted step.
+`EditorToolset.EditorAppToolset.OpenEditorForAsset(assetPath)` opens the MetaHuman Character editor, Identity
+editor, Performance editor, etc. Use it when the user wants to look at a result; it is not needed for any
+scripted step.
 
 ## Typical opening sequence
 
 ```python
 s = json.loads(svc.get_status())
 assert s["plugins"]["MetaHumanCharacter"] == "enabled"
-chars = json.loads(svc.list_assets("character", "/Game"))["assets"]
-presets = json.loads(svc.list_assets("preset", ""))["assets"] if s["optional_content_installed"] else []
+chars = await call_tool("EditorToolset.AssetToolset.FindAssets", filter={"folderPath": "/Game", "assetType": "/Script/MetaHumanCharacter.MetaHumanCharacter", "bRecursive": True, "maxResults": 0})
+presets = (await call_tool("EditorToolset.AssetToolset.FindAssets", filter={"folderPath": "/MetaHumanCharacter/Optional/Presets", "assetType": "/Script/MetaHumanCharacter.MetaHumanCharacter", "bRecursive": True, "maxResults": 0})) if s["optional_content_installed"] else []
 ```

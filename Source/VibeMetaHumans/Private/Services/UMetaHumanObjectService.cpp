@@ -220,19 +220,3 @@ FString UMetaHumanObjectService::DescribeStruct(const FString& StructPath)
 	return VmhJson::Ok(Out);
 }
 
-FString UMetaHumanObjectService::SaveAsset(const FString& AssetPath)
-{
-	UObject* Asset = VmhAssets::Load(AssetPath);
-	if (!Asset)
-	{
-		return VmhJson::Error(TEXT("ASSET_NOT_FOUND"), FString::Printf(TEXT("No asset at %s"), *AssetPath));
-	}
-	FString Error;
-	if (!VmhAssets::Save(Asset, Error))
-	{
-		return VmhJson::Error(TEXT("SAVE_FAILED"), Error);
-	}
-	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
-	Out->SetStringField(TEXT("asset"), Asset->GetPathName());
-	return VmhJson::Ok(Out);
-}

@@ -45,6 +45,9 @@
 		{ "Name": "LevelSequenceEditor", "Enabled": true },
 		{ "Name": "CaptureManagerEditor", "Enabled": true, "Optional": true },
 		{ "Name": "AppleARKitFaceSupport", "Enabled": true, "Optional": true },
-		{ "Name": "MetaHumanAnimationTools", "Enabled": true, "Optional": true }
+		{ "Name": "MetaHumanAnimationTools", "Enabled": true, "Optional": true },
+		{ "Name": "EditorToolset", "Enabled": true, "Optional": true },
+		{ "Name": "CaptureManagerToolset", "Enabled": true, "Optional": true },
+		{ "Name": "MetaHumanAnimatorToolset", "Enabled": true, "Optional": true }
 	]
 }

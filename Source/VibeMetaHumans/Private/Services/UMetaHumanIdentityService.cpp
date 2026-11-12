@@ -193,11 +193,11 @@ FString UMetaHumanIdentityService::CreateIdentityFromFootage(const FString& Pack
 		if (Identity->IsLoggedInToService())
 		{
 			Identity->CreateDNAForIdentity(/*bLogOnly*/ true);
-			Out->SetStringField(TEXT("auto_rig"), TEXT("requested (asynchronous) - poll get_status until auto_rig_in_progress is false and face.has_dna is true, then call prepare_for_performance"));
+			Out->SetStringField(TEXT("auto_rig"), TEXT("requested (asynchronous) - poll get_status until auto_rig_in_progress is false and face.has_dna is true, then call MetaHumanAnimatorIdentityTools.PrepareIdentityForPerformance"));
 		}
 		else
 		{
-			Out->SetStringField(TEXT("auto_rig"), TEXT("skipped: not logged in to the MetaHuman service. Call log_in_to_service, then request_auto_rig."));
+			Out->SetStringField(TEXT("auto_rig"), TEXT("skipped: not logged in to the MetaHuman service. Call log_in_to_service, then MetaHumanAnimatorIdentityTools.GenerateIdentityRig."));
 		}
 	}
 	else if (bPrepareForPerformance)
@@ -266,58 +266,6 @@ FString UMetaHumanIdentityService::GetStatus(const FString& IdentityPath)
 		return VmhJson::Error(TEXT("IDENTITY_NOT_FOUND"), Error);
 	}
 	return VmhJson::Ok(StatusJson(Identity));
-}
-
-FString UMetaHumanIdentityService::RequestAutoRig(const FString& IdentityPath)
-{
-	FString Error;
-	UMetaHumanIdentity* Identity = LoadIdentity(IdentityPath, Error);
-	if (!Identity)
-	{
-		return VmhJson::Error(TEXT("IDENTITY_NOT_FOUND"), Error);
-	}
-	UMetaHumanIdentityFace* Face = GetFace(Identity, false);
-	if (!Face || !Face->IsConformalRigValid())
-	{
-		return VmhJson::Error(TEXT("NOT_CONFORMED"), TEXT("The identity's face is not conformed yet (create_identity_from_footage does that)"));
-	}
-	if (!Identity->IsLoggedInToService())
-	{
-		Identity->LogInToAutoRigService();
-		if (!Identity->IsLoggedInToService())
-		{
-			return VmhJson::Error(TEXT("NOT_LOGGED_IN"), TEXT("Not logged in to the MetaHuman service; complete the Epic login then retry"));
-		}
-	}
-	Identity->CreateDNAForIdentity(/*bLogOnly*/ true);
-	TSharedPtr<FJsonObject> Out = StatusJson(Identity);
-	Out->SetStringField(TEXT("auto_rig"), TEXT("requested (asynchronous) - poll get_status"));
-	return VmhJson::Ok(Out);
-}
-
-FString UMetaHumanIdentityService::PrepareForPerformance(const FString& IdentityPath)
-{
-	FString Error;
-	UMetaHumanIdentity* Identity = LoadIdentity(IdentityPath, Error);
-	if (!Identity)
-	{
-		return VmhJson::Error(TEXT("IDENTITY_NOT_FOUND"), Error);
-	}
-	UMetaHumanIdentityFace* Face = GetFace(Identity, false);
-	if (!Face)
-	{
-		return VmhJson::Error(TEXT("NO_FACE_PART"), TEXT("The identity has no Face part"));
-	}
-	if (!Face->HasDNABuffer())
-	{
-		return VmhJson::Error(TEXT("NO_DNA"), TEXT("The face has no DNA yet; request_auto_rig (and wait for it) first"));
-	}
-	const bool bOk = Face->RunPredictiveSolverTraining();
-	FString SaveError;
-	VmhAssets::Save(Identity, SaveError);
-	TSharedPtr<FJsonObject> Out = StatusJson(Identity);
-	Out->SetBoolField(TEXT("prepared_for_performance"), bOk);
-	return bOk ? VmhJson::Ok(Out) : VmhJson::Error(TEXT("PREPARE_FAILED"), TEXT("RunPredictiveSolverTraining returned false (see Output Log)"), Out);
 }
 
 FString UMetaHumanIdentityService::LogInToService(const FString& IdentityPath)
