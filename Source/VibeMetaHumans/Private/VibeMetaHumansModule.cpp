@@ -4,14 +4,12 @@
 
 #include "Editor.h"
 #include "HAL/IConsoleManager.h"
-#include "IPythonScriptPlugin.h"
 #include "Misc/CoreDelegates.h"
 #include "Modules/ModuleManager.h"
 #include "ToolsetRegistry/ToolsetDefinition.h"
 #include "ToolsetRegistry/UToolsetRegistry.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
-#include "Utils/VibeMetaHumansPaths.h"
 
 DEFINE_LOG_CATEGORY(LogVibeMetaHumans);
 
@@ -73,23 +71,8 @@ namespace
 		TEXT("List the VibeMetaHumans service toolsets and their AICallable tool counts"),
 		FConsoleCommandDelegate::CreateStatic(ListToolsets));
 
-	// Re-scan Content/Skills and refresh the registered AgentSkill CDOs so skill edits are served
-	// without an editor restart. init_unreal.py upserts: existing classes get fresh markdown, new
-	// packs register; deleted packs linger until the next launch.
-	FAutoConsoleCommand ReloadSkillsCommand(
-		TEXT("VibeMetaHumans.ReloadSkills"),
-		TEXT("Re-read Content/Skills markdown into the registered AgentSkills (no editor restart needed)."),
-		FConsoleCommandDelegate::CreateLambda([]()
-		{
-			IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
-			if (!Python || !Python->IsPythonAvailable())
-			{
-				UE_LOG(LogVibeMetaHumans, Warning, TEXT("VibeMetaHumans.ReloadSkills: Python is not available."));
-				return;
-			}
-			const FString ScriptPath = FVibeMetaHumansPaths::GetPluginContentDir() / TEXT("Python") / TEXT("init_unreal.py");
-			Python->ExecPythonCommand(*ScriptPath);
-		}));
+	// No skill-reload command: UE 5.9 discovers <Plugin>/Skills/**/SKILL.md natively
+	// (ToolsetRegistry MarkdownAgentSkills) and re-reads the files on every GetSkills call.
 }
 
 void FVibeMetaHumansModule::StartupModule()

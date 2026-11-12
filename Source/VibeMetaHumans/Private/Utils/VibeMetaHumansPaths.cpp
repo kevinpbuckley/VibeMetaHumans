@@ -38,8 +38,8 @@ FString FVibeMetaHumansPaths::GetPluginContentDir()
 
 FString FVibeMetaHumansPaths::GetSkillsDir()
 {
-	const FString ContentDir = GetPluginContentDir();
-	return ContentDir.IsEmpty() ? FString() : ContentDir / TEXT("Skills");
+	const FString PluginDir = GetPluginDir();
+	return PluginDir.IsEmpty() ? FString() : PluginDir / TEXT("Skills");
 }
 
 FString FVibeMetaHumansPaths::GetSavedDir()

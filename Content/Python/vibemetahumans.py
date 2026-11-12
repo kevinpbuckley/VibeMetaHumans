@@ -1,7 +1,7 @@
 # Copyright Buckley Builds LLC 2026 All Rights Reserved.
 """Agent-ergonomics helpers for VibeMetaHumans.
 
-Usage from execute_python_code (VibeUE) or any editor Python:
+Usage from the engine's execute_python MCP tool or any editor Python:
 
     import unreal, vibemetahumans as vmh
 

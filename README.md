@@ -49,13 +49,14 @@ Every tool returns a JSON string: `{"success": true, ...}` or
 4. Verify in the editor console: `VibeMetaHumans.ListToolsets` (expect 6 toolsets) and from the
    agent: `unreal.MetaHumanSetupService.get_status()`.
 
-Skill packs under `Content/Skills` register as native **AgentSkills** at startup
-(`ToolsetRegistry.AgentSkillToolset` → `ListSkills` / `GetSkills`), the same way VibeUE's do.
-`VibeMetaHumans.ReloadSkills` re-reads them without a restart.
+Skill packs under `Skills/` are discovered natively by UE 5.9 (`<Plugin>/Skills/**/SKILL.md`) and
+served through `ToolsetRegistry.AgentSkillToolset` → `ListSkills` / `GetSkills` as
+`/Skills/VibeMetaHumans/<pack>`, the same way VibeUE's are. The engine re-reads the files on every
+call, so edits need no reload or restart.
 
 ---
 
-## Quick tour (editor Python, or `execute_python_code` through VibeUE)
+## Quick tour (editor Python, or the engine's `execute_python` MCP tool)
 
 ```python
 import json, unreal
@@ -105,7 +106,7 @@ ll.start_take_recording(["Webcam"]); ...; ll.stop_take_recording()
 ```
 
 Through the MCP endpoint the same tools appear as `VibeMetaHumans.MetaHumanCharacterService.CreateCharacter`
-etc. (`list_toolsets` / `describe_toolset` / `call_tool`).
+etc. (`list_toolsets` / `describe_tools` / `call_tool`).
 
 ---
 
@@ -120,9 +121,8 @@ VibeMetaHumans/
 │   ├── Public|Private/Utils/VmhJson.*   # JSON results, struct<->JSON, property patching, reflection calls
 │   ├── Public|Private/Utils/VmhAssets.* # load/create/save assets, find actors
 │   └── VibeMetaHumansModule.*           # reflection-based toolset registration, console commands
-├── Content/Python/init_unreal.py        # registers Content/Skills as AgentSkills
 ├── Content/Python/vibemetahumans.py     # agent helpers (status, toolset discovery)
-└── Content/Skills/<pack>/SKILL.md       # metahuman (router), -setup, -creator, -animator, -live-link
+└── Skills/<pack>/SKILL.md               # metahuman (router), -setup, -creator, -animator, -live-link (native 5.9 discovery)
 ```
 
 Design notes:
@@ -136,8 +136,9 @@ Design notes:
   `MetaHumanObjectService.describe_struct("MetaHumanCharacterEyesSettings")` to see a shape.
 - Long operations (auto-rig, texture download, performance processing) run blocking on the game
   thread so one tool call = one finished step; Epic's MCP endpoint has no request timeout.
-- Nothing here needs the VibeUE plugin, but they pair well: VibeUE's `execute_python_code` is the
-  easiest way to drive these services, and its `capture_image` shows the result.
+- Nothing here needs the VibeUE plugin. The engine's own `execute_python` MCP tool is the easiest
+  way to drive these services, and `SceneCaptureToolset.CaptureActiveEditorView` (or
+  `CaptureGameViewport` in PIE) shows the result.
 
 ## Status
 

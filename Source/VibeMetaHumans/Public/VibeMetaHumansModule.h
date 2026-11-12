@@ -13,8 +13,8 @@ DECLARE_LOG_CATEGORY_EXTERN(LogVibeMetaHumans, Log, All);
  * Registers every non-abstract UToolsetDefinition subclass declared in this module with Epic's
  * ToolsetRegistry, which in turn exposes their AICallable static UFUNCTIONs as tools on the
  * engine's native MCP endpoint (ModelContextProtocol plugin) and as unreal.<Service>.* in editor
- * Python. Skill packs under Content/Skills are registered as native AgentSkills by
- * Content/Python/init_unreal.py.
+ * Python. Skill packs under <plugin>/Skills are discovered natively by UE 5.9's ToolsetRegistry
+ * (MarkdownAgentSkills) and served as /Skills/VibeMetaHumans/<pack>.
  */
 class FVibeMetaHumansModule : public IModuleInterface
 {

@@ -17,7 +17,7 @@ public:
 	/** Absolute path to <plugin>/Content, or empty if the plugin cannot be located. */
 	static FString GetPluginContentDir();
 
-	/** Absolute path to <plugin>/Content/Skills, or empty if the plugin cannot be located. */
+	/** Absolute path to <plugin>/Skills (UE 5.9's native skill discovery root), or empty if the plugin cannot be located. */
 	static FString GetSkillsDir();
 
 	/** Absolute path to Project/Saved/VibeMetaHumans (created on demand; empty on failure). */

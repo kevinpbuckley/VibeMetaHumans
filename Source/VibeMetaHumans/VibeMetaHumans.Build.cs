@@ -49,7 +49,6 @@ public class VibeMetaHumans : ModuleRules
 				"UnrealEd",
 				"EditorSubsystem",
 				"EditorScriptingUtilities",
-				"PythonScriptPlugin",
 				"Projects",                 // IPluginManager
 				"AssetRegistry",
 				"AssetTools",
