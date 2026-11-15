@@ -18,6 +18,7 @@ GROUPS = set((ARGS[0] if ARGS else "all").replace(",", "+").split("+"))   # -Exe
 BP = ARGS[1] if len(ARGS) > 1 else "/Game/DirectorsCut/Characters/Lila/BP_Lila"
 ANIM = ARGS[2] if len(ARGS) > 2 else "/Game/DirectorsCut/Animation/Body/A_Idle_Seated_Lila"
 TEST = "/Game/VmhTest"
+RUN = __import__("time").strftime("%H%M%S")   # the GeometryScript helpers save new meshes and never overwrite: unique names
 OUT = os.path.join(unreal.Paths.project_saved_dir(), "VibeMetaHumans", "tests")
 os.makedirs(OUT, exist_ok=True)
 EAL = unreal.EditorAssetLibrary
@@ -147,10 +148,169 @@ def t_audit():
           clean_list=[(o["component"], o["property"]) for a in clean.get("actors", []) for o in a["overrides"]][:10])
 
 
+# ------------------------------------------------------------------ #1 runtime poses, poke-through, push
+def full_body(nodes):
+    """the uncut body next to the built one (make_full_body_from_dna's default name), else the Body mesh"""
+    body = body_mesh(nodes).split(".")[0]
+    full = body[:body.index("BodyMesh") + len("BodyMesh")] + "_Full" if "BodyMesh" in body else body + "_Full"
+    return full if EAL.does_asset_exist(full) else body
+
+
+def visible_garments(nodes, gs):
+    """the garment the seated test clip shows (Lila's seated gown variant), else the visible garments"""
+    seated = [g for g in gs if "Seated" in g]
+    return seated[:1] or [g for g in gs if nodes[g].get_editor_property("visible") and "Shoe" not in g] or gs[:1]
+
+
+def t_push():
+    nodes, gs = garments(BP)
+    d = J(wd.dump_runtime_poses(BP, json.dumps([{"anim": ANIM, "times": [0.0, 1.0]}]), os.path.join(OUT, "poses.json")))
+    diffs = [x["runtime_vs_asset_max_cm"] for x in d.get("runtime_vs_asset", [])]
+    check("push.dump_runtime_poses", d["success"] and d["poses"] == 2 and os.path.exists(d["file"]),
+          runtime_vs_asset=d.get("runtime_vs_asset"))
+    vis = visible_garments(nodes, gs)
+    full = full_body(nodes)
+    poses = {"poses": [{"file": d["file"]}]}
+    m_fit = J(wd.measure_poke_through(BP, json.dumps(vis), json.dumps(poses)))
+    m_full = J(wd.measure_poke_through(BP, json.dumps(vis), json.dumps(dict(poses, body_mesh=full))))
+    w = lambda m: [(g["garment"], g["vertices_outside"], round(g["worst_cm"], 2), g.get("worst_at_bind_cm"), g.get("worst_pose"), g.get("outside_by_bone")) for g in m["lods"][0]["garments"]]  # noqa: E731
+    check("push.measure", m_fit["success"] and m_full["success"], body=w(m_fit), full_body=w(m_full), full=full)
+    path = dup_bp("BP_PushTest")
+    r = J(wd.push_body_under_garments(path, json.dumps(vis), f"{TEST}/SKM_PushTest",
+                                      json.dumps(dict(poses, source_body=full, lods=[0])), True, False))
+    lod0 = r["lods"][0] if r.get("success") else {}
+    after = J(wd.measure_poke_through(path, json.dumps(vis), json.dumps(poses)))
+    check("push.fit", r["success"] and lod0.get("outside_after", 1) <= max(3, lod0.get("outside_before", 0) // 4),
+          before=(lod0.get("outside_before"), lod0.get("worst_before_cm")), after=(lod0.get("outside_after"), lod0.get("worst_after_cm")),
+          moved=lod0.get("vertices_moved"), max_push=lod0.get("max_push_cm"), passes=lod0.get("passes"),
+          remeasured=w(after) if after.get("success") else after)
+
+
+# ------------------------------------------------------------------ #6 inner garment trim (dry run)
+def t_intake():
+    for bp in (BP, "/Game/DirectorsCut/Characters/Theo/BP_Theo", "/Game/DirectorsCut/Characters/Benny/BP_Benny"):
+        nodes, gs = garments(bp)
+        inner = [g for g in gs if "Shirt" in g or "Sweater" in g or "Knit" in g]
+        outer = [g for g in gs if "Jacket" in g or "Coat" in g]
+        if inner and outer:
+            r = J(wd.trim_inner_garment(bp, inner[0], json.dumps(outer), f"{TEST}/SKM_TrimTest", json.dumps({"lods": [0]}), False, True))
+            check("intake.trim_inner", r["success"] and r["lods"][0]["deleted"] > 0, bp=bp, inner=inner[0], outer=outer,
+                  lod0={k: r["lods"][0].get(k) for k in ("triangles", "deleted", "deleted_fragments", "covered_inside_or_shell", "covered_by_rays")} if r.get("success") else r)
+            return
+    check("intake.trim_inner", False, error="no Blueprint with a shirt under a jacket")
+
+
+# ------------------------------------------------------------------ #2 fit-view capture (needs a rendering editor)
+def t_capture():
+    r = J(wd.capture_fit_views(BP, ANIM, 1.0, json.dumps(["front", "low_front"]), os.path.join(OUT, "fit"), json.dumps({"width": 512, "height": 768})))
+    files = r.get("files", [])
+    check("capture.fit_views", r["success"] and len(files) == 2 and all(os.path.exists(f["file"]) and f["non_dark_fraction"] > 0.01 for f in files),
+          files=files, error=r.get("error"))
+    h = J(wd.capture_fit_views(BP, "", 0.0, json.dumps(["front"]), os.path.join(OUT, "fit"), json.dumps({"focus": "head", "width": 512, "height": 512})))
+    check("capture.head", h["success"] and h["files"][0]["non_dark_fraction"] > 0.05, files=h.get("files"), error=h.get("error"))
+
+
+# ------------------------------------------------------------------ #8 blinks + face AnimBP
+FACE_DIR = "/Game/DirectorsCut/Anims/Face"
+
+
+def blink_peaks(seq, name="CTRL_expressions_eyeBlinkL"):
+    names = {str(c).lower(): str(c) for c in unreal.AnimationLibrary.get_animation_curve_names(seq, unreal.RawCurveTrackTypes.RCT_FLOAT)}
+    if name.lower() not in names:
+        return []
+    t, v = unreal.AnimationLibrary.get_float_keys(seq, names[name.lower()])
+    return [round(t[i], 2) for i in range(len(v)) if v[i] >= 0.99 and (i == 0 or v[i - 1] < 0.99)]
+
+
+def t_blinks():
+    ar = unreal.AssetRegistryHelpers.get_asset_registry()
+    src = sorted(str(a.package_name) for a in ar.get_assets_by_path(FACE_DIR, True) if str(a.asset_name).startswith("FA_"))[0]
+    dst = f"{TEST}/FA_BlinkTest"
+    if EAL.does_asset_exist(dst):
+        EAL.delete_asset(dst)
+    EAL.duplicate_asset(src, dst)
+    seq = unreal.load_asset(dst)
+    # strip the copy's blinks so the pass has work to do
+    for c in ("CTRL_expressions_eyeBlinkL", "CTRL_expressions_eyeBlinkR"):
+        names = {str(n).lower(): n for n in unreal.AnimationLibrary.get_animation_curve_names(seq, unreal.RawCurveTrackTypes.RCT_FLOAT)}
+        if c.lower() in names:
+            unreal.AnimationLibrary.remove_curve(seq, names[c.lower()], False)
+    dry = J(an.add_blinks(dst, 2.8, 4.2, True, "{}"))
+    wet = J(an.add_blinks(dst, 2.8, 4.2, False, "{}"))
+    peaks = blink_peaks(unreal.load_asset(dst))
+    again = J(an.add_blinks(dst, 2.8, 4.2, True, "{}"))
+    planned = dry["report"][0]["added_at"]
+    check("blinks.add", wet["success"] and len(planned) > 0 and len(peaks) == len(planned) and again["blinks_added"] == 0,
+          length=dry["report"][0]["length_s"], planned=planned, peaks_after=peaks, rerun_adds=again.get("blinks_added"))
+
+
+def t_faceabp():
+    name = "ABP_FaceSlotTest"
+    if EAL.does_asset_exist(f"{TEST}/{name}"):
+        EAL.delete_asset(f"{TEST}/{name}")
+    blink = "/Game/DirectorsCut/Anims/A_Face_BlinkLoop"
+    r = J(an.create_face_anim_blueprint(TEST, name, "", blink if EAL.does_asset_exist(blink) else "", "DefaultSlot"))
+    check("faceabp.create", r["success"] and r.get("compiled") and r.get("linked"), result=r)
+
+
+# ------------------------------------------------------------------ #5 skinned accessory, #6 variant + weight transfer
+def find_assets(root, cls):
+    ar = unreal.AssetRegistryHelpers.get_asset_registry()
+    return sorted(str(a.package_name) for a in ar.get_assets_by_path(root, True) if str(a.asset_class_path.asset_name) == cls)
+
+
+def t_accessory():
+    path = dup_bp("BP_AccTest")
+    sms = find_assets("/Game/DirectorsCut/Characters/Accessories", "StaticMesh")
+    sm = [s for s in sms if "Brooch" in s or "Pocket" in s or "Tags" in s][:1] or sms[:1]
+    for mode in ("surface", "rigid"):
+        out = f"{TEST}/SKM_AccTest_{mode}_{RUN}"
+        if EAL.does_asset_exist(out):
+            EAL.delete_asset(out)
+        r = J(wd.add_skinned_accessory(path, sm[0], f"ACC_Test_{mode}", mode, '["Body"]', "spine_05",
+                                       json.dumps({"location": [0, 12, 0]}), out))
+        check(f"accessory.{mode}", r.get("success"), static_mesh=sm[0], mesh=r.get("mesh"), rigid_bone=r.get("rigid_bone"),
+              top=r.get("top_bones"), lod_fix=r.get("lod_fix"), error=r.get("error"),
+              follower=(r.get("attach") or {}).get("follower_check", {}).get("unevaluated_bone_vertices"))
+
+
+def t_intake2():
+    fab = [m for m in find_assets("/Game/Fab", "SkeletalMesh")][:1]
+    if not fab:
+        check("intake.variant", False, error="no skeletal mesh under /Game/Fab")
+        return
+    r = J(wd.make_garment_variant(fab[0], f"{TEST}/Wardrobe", "VariantTest", "", 1024))
+    check("intake.variant", r.get("success") and all(not m["pack_textures_left"] for m in r.get("materials", [])) if r.get("success") else False,
+          source=fab[0], result=r)
+    nodes, _ = garments(BP)
+    out = f"{TEST}/SKM_TransferTest_{RUN}"
+    if EAL.does_asset_exist(out):
+        EAL.delete_asset(out)
+    t = J(wd.transfer_skin_weights(r.get("mesh", fab[0]), body_mesh(nodes), out, "closest"))
+    check("intake.transfer", t.get("success"), result=t)
+
+
+# ------------------------------------------------------------------ #7 face-fit capture
+def t_landmarks():
+    ch = BP.rsplit("/", 1)[0] + "/MH_" + BP.rsplit("/BP_", 1)[1]
+    r = J(mh.capture_face_for_fit(ch, os.path.join(OUT, "facefit"), "test", 768, 30.0, False, True))
+    ok = r.get("success") and os.path.exists(r.get("image", "")) and os.path.exists(r.get("meta", ""))
+    check("landmarks.capture", ok, character=ch, image=r.get("image"), landmarks=r.get("landmarks"),
+          contours=sorted((r.get("tracked_contours_px") or {}).keys())[:6], tracking_error=r.get("tracking_error"), error=r.get("error"))
+
+
+run("accessory", t_accessory)
+run("intake", t_intake2)
+run("landmarks", t_landmarks)
+run("blinks", t_blinks)
+run("faceabp", t_faceabp)
 run("describe", t_describe)
 run("snapshot", t_snapshot)
 run("fixup", t_fixup)
 run("audit", t_audit)
+run("push", t_push)
+run("intake", t_intake)
+run("capture", t_capture)
 
 with open(os.path.join(OUT, "postjam.json"), "w") as f:
     json.dump(results, f, indent=1)

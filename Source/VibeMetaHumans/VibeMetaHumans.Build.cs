@@ -95,6 +95,11 @@ public class VibeMetaHumans : ModuleRules
 				"GeometryFramework",        // UDynamicMeshComponent
 				"HairStrandsCore",          // UGroomComponent/UGroomAsset/UGroomBindingAsset (2026-10-07 hair tools)
 				"HairStrandsEditor",        // UHairStrandsFactory (import_groom)
+				"AnimGraph",                // create_face_anim_blueprint: UAnimGraphNode_* (2026-11-14)
+				"AnimGraphRuntime",         // FAnimNode_LayeredBoneBlend / ModifyCurve / CopyPoseFromMesh
+				"BlueprintGraph",
+				"KismetCompiler",
+				"PythonScriptPlugin",       // the GeometryScript-backed wardrobe helpers in Content/Python/vmh_wardrobe.py
 
 				// MetaHuman Animator (MetaHuman plugin)
 				"MetaHumanCore",

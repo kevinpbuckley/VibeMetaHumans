@@ -20,17 +20,24 @@ class USkeletalMesh;
  *                                      weighted to them collapse to the actor origin (spikes from the cuffs to the floor).
  *   2. make_full_body_from_dna       - the built body has the faces under the Creator's default tee/shorts removed;
  *                                      anything showing more skin (a dress, an open collar) needs the full topology back.
- *   3. hide_body_under_garments      - a body copy with the skin the garments cover deleted (no poke-through).
+ *   3. push_body_under_garments      - under a dress or an open garment: skin that comes through moved inward (the
+ *                                      default; deleting it showed holes). hide_body_under_garments deletes the skin
+ *                                      closed garments cover (trousers, shoes); trim_inner_garment does it to a shirt
+ *                                      under a jacket.
  *   4. push_garment_out_of_mesh      - the MetaHuman face mesh's neck skirt reaches the collarbones and pokes through
  *                                      necklines; push the garment out over it (or over the body).
  *   5. snapshot/restore_blueprint_components - a Creator rebuild regenerates BP_<Name> and drops all of the above;
- *                                      record the Blueprint first and put it back after (build(..., preserve) does both).
+ *                                      record the Blueprint first and put it back after (build(..., preserve) does both);
+ *                                      then post_build_fixup, and audit_placed_instances on the level.
  *   6. fill_groom_lods                - Optimized builds leave groom LODs with no geometry (bald at LOD4/LOD6).
+ * Checks: describe_skeletal_mesh, measure_poke_through, capture_fit_views. Intake: make_garment_variant,
+ * transfer_skin_weights. Accessories: add_skinned_accessory.
  *
- * Everything is computed from asset data (reference skeletons, mesh descriptions, AnimSequences), so no level, actor,
- * viewport or PIE session is needed. Poses: the rest pose always, plus any {"anim": path, "time": s} you list (e.g. a
- * seated idle), retargeted onto the Body mesh. Body correctives driven by RigLogic are not evaluated in those poses.
- * Nothing is saved: save the touched packages afterwards.
+ * Geometry is computed from asset data (reference skeletons, mesh descriptions). Poses: the rest pose always, plus the
+ * listed ones - {"anim": path, "time"|"times"|"stride"} sampled on the asset ("evaluate":"asset": the body's post-process
+ * correctives stay at rest, up to 14 cm off in a seated pose) or played on the Blueprint in a private preview world
+ * ("evaluate":"runtime": every anim graph evaluated, as in PIE), or {"file": dump} from dump_runtime_poses /
+ * dump_actor_pose. No level, PIE or viewport is needed. Nothing is saved unless a method says so.
  */
 UCLASS(BlueprintType)
 class VIBEMETAHUMANS_API UMetaHumanWardrobeService : public UToolsetDefinition
@@ -82,8 +89,12 @@ public:
 	 * contracted by ray_contract rings. delete_boxes always go (fully covered zones such as trouser legs, where pocket
 	 * openings let rays through); keep_boxes never go (skin inside a neckline). Boxes: [[min],[max]] cm, Body space.
 	 * OptionsJson defaults: {"shell":2,"contract":2,"use_rays":true,"ray_out":6,"ray_in":5,"ray_contract":1,
-	 * "winding":0.5,"pose_combine":"all","poses":[],"lods":[],"keep_boxes":[],"delete_boxes":[],"body_component":"Body",
-	 * "source_body":""}. Re-runs start from the source body each time. bAssignToBlueprint points Body at the result.
+	 * "winding":0.5,"pose_combine":"all","poses":[],"evaluate":"asset","lods":[],"keep_boxes":[],"delete_boxes":[],
+	 * "body_component":"Body","source_body":"","target_component":"","min_fragment":0}. Re-runs start from the source
+	 * body each time. target_component cuts another mesh than the body (an inner garment, skinned as the body's
+	 * follower; see trim_inner_garment); min_fragment also deletes islands of that many triangles or fewer the cut leaves.
+	 * bAssignToBlueprint points the cut component at the result. For closed garments only: under a dress or an open
+	 * garment a deleted patch is a hole from some camera - use push_body_under_garments.
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
 	static FString HideBodyUnderGarments(const FString& BlueprintPath, const FString& GarmentComponentsJson, const FString& OutBodyMeshPath, const FString& OptionsJson = TEXT("{}"), bool bAssignToBlueprint = false, bool bDryRun = false);
@@ -131,6 +142,116 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
 	static FString FillGroomLods(const FString& GroomPath, bool bMakeHiddenLodsVisible = false, bool bDryRun = false);
+
+	/**
+	 * The default under a dress, a gown, a slit, short sleeves, a bare back or an open collar: write OutBodyMeshPath, the
+	 * source body (options.source_body - use the UNCUT full body from make_full_body_from_dna - else the Body
+	 * component's mesh) with every skin vertex that comes out through the garments in any listed pose moved inward, at
+	 * the bind pose, to `margin` cm under the cloth. Nothing is deleted, so no camera sees a hole (deleting skin under a
+	 * dress showed a see-through crotch from a low camera and a black patch on an upper arm). Each LOD is solved on its
+	 * own geometry. A vertex is "under" a garment when the nearest cloth point lies along the skin's normal and skin and
+	 * cloth face the same way (an arm hanging beside a skirt is left alone); the cloth's outward side comes from the
+	 * skeleton, never its winding. Poses default to "runtime" evaluation (the Blueprint in a preview world, post-process
+	 * correctives included: asset-sampled seated poses were up to 14 cm off), or pass dumps: {"poses":[{"file": ...}]}.
+	 * OptionsJson defaults: {"margin":0.6,"reach":6,"max_depth":2.0,"facing":0.3,"passes":4,"max_push":5,
+	 * "spread_rings":3,"spread_falloff":0.7,"exclude_bones":["head","neck_*","FACIAL_*","hand_*","thumb_*","index_*",
+	 * "middle_*","ring_*","pinky_*"] (dominant bone; a hand resting on the lap is not poke-through),"exclude_boxes":[],
+	 * "only_boxes":[],"limits":[{"box":[[min],[max]],"max_push":0.8}],"poses":[],"evaluate":"runtime","lods":[],
+	 * "body_component":"Body","source_body":""}. Reports per LOD and pass the vertices outside the cloth and the worst
+	 * depth. bAssignToBlueprint points Body at the result. Deleting is still right for closed garments
+	 * (hide_body_under_garments: legs in trousers, feet in shoes); run it on the pushed body when both apply.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString PushBodyUnderGarments(const FString& BlueprintPath, const FString& GarmentComponentsJson, const FString& OutBodyMeshPath, const FString& OptionsJson = TEXT("{}"), bool bAssignToBlueprint = false, bool bDryRun = false);
+
+	/**
+	 * Read-only poke-through check: for each garment component and each listed pose, how many body vertices come out
+	 * through it and the worst depth in cm (with the bind position of the worst vertex and its pose). Same rules and
+	 * options as push_body_under_garments (poses default to runtime evaluation; options.body_mesh measures another body
+	 * than the Body component's; options.lods default [0]). Run it before and after a fit, in the poses the game uses.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString MeasurePokeThrough(const FString& BlueprintPath, const FString& GarmentComponentsJson, const FString& OptionsJson = TEXT("{}"));
+
+	/**
+	 * Drop an inner garment's triangles that the outer garments hide (a shirt under a jacket flecks through it), on a
+	 * copy OutMeshPath, in every listed pose, and remove the islands of 40 triangles or fewer the cut leaves. It is
+	 * hide_body_under_garments with target_component = InnerComponent and the jam's layer values (shell 0.6, winding
+	 * 0.6, contract 2, ray_out 5, ray_in 3, min_fragment 40); OptionsJson overrides any of them (and takes poses,
+	 * keep_boxes, delete_boxes, source_body). Pass the rest AND the seated pose. bAssignToBlueprint points the inner
+	 * component at the copy.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString TrimInnerGarment(const FString& BlueprintPath, const FString& InnerComponent, const FString& OuterComponentsJson, const FString& OutMeshPath, const FString& OptionsJson = TEXT("{}"), bool bAssignToBlueprint = false, bool bDryRun = false);
+
+	/**
+	 * Render a dressed character for review without a level change or PIE: the Blueprint is spawned in a private
+	 * preview world, the body plays AnimPath at Time (empty = the Blueprint's own pose), every anim graph is evaluated
+	 * (the post-process AnimBP's correctives too) and each view is captured to a PNG. ViewsJson: names "front",
+	 * "three_quarter", "side", "back", "right", "low_front", "high_front", or {"name","yaw","pitch"} (MetaHumans face
+	 * +Y: yaw 90 is the front; pitch < 0 puts the camera below - use it for skirts). OutDir default
+	 * Saved/VibeMetaHumans/FitViews. OptionsJson: {"times":[s...] (several poses of the clip), "focus":"body"|"head"|
+	 * "chest"|"legs"|"hands", "lod":0, "width":768, "height":1024, "fov":30, "exposure_bias":0, "hide_components":[],
+	 * "body_component":"Body"}. Returns the files (and the fraction of non-dark pixels, to catch an empty frame). Needs
+	 * a rendering editor (not -nullrhi). Grooms may not draw in a scene capture: judge hair in PIE.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString CaptureFitViews(const FString& BlueprintPath, const FString& AnimPath = TEXT(""), float Time = 0.f, const FString& ViewsJson = TEXT("[\"front\",\"three_quarter\",\"side\",\"back\"]"), const FString& OutDir = TEXT(""), const FString& OptionsJson = TEXT("{}"));
+
+	/**
+	 * Evaluate body poses as the game shows them (the Blueprint in a preview world, every anim graph including the
+	 * post-process AnimBP) and write them to OutFilePath (default Saved/VibeMetaHumans/Poses/<BP>_poses.json) as Body
+	 * component-space bone transforms. PosesJson: [{"anim": path, "time": s} | {"anim", "times": [...]} |
+	 * {"anim", "stride": s}]. Reports, per pose, how far the runtime pose is from sampling the clip on the asset (the
+	 * jam measured up to 14 cm in seated poses). Feed the file to the fit tools: {"poses": [{"file": <file>}]}.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString DumpRuntimePoses(const FString& BlueprintPath, const FString& PosesJson, const FString& OutFilePath = TEXT(""));
+
+	/**
+	 * Append the current pose of a placed character's skeletal mesh component (default "Body") to a pose file, read from
+	 * the running PIE world when there is one, else the editor world: the exact pose the game shows, for the fit tools'
+	 * {"poses": [{"file": ...}]}. Call it at the moments that matter while the game plays.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString DumpActorPose(const FString& ActorLabel, const FString& ComponentName = TEXT("Body"), const FString& OutFilePath = TEXT(""), const FString& Label = TEXT(""), bool bAppend = true);
+
+	/**
+	 * A static accessory (tie, scarf, chain, brooch, pocket square) as a leader-pose SKINNED mesh under Body, so it follows
+	 * the surface under it instead of floating or kinking on one bone. The static mesh is placed like a static mesh on
+	 * Bone's socket with RelativeJson {"location":[x,y,z],"rotation":[roll,pitch,yaw],"scale":[x,y,z]} at Body's
+	 * reference pose; the new skeletal mesh (OutMeshPath, default <static mesh folder>/SKM_<name>_Skinned) carries the
+	 * body's skeleton. Mode "surface": weights by closest point from SurfaceComponentsJson as displayed at rest (the
+	 * garment it lies on; default ["Body"]); "rigid": all weight on the dominant bone under it (stiff pieces: no kinks).
+	 * Weights are then moved off bones the body drops at lower LODs, and the mesh is attached as ComponentName (leader
+	 * pose, leader bounds). Runs Content/Python/vmh_wardrobe.py on GeometryScript (the GeometryScripting plugin must be
+	 * enabled). Check it with capture_fit_views (focus "chest", seated and standing). Saves the new mesh only.
+	 * Jam lesson: a piece along the body's centre line over an opening (a tie on an open collar) has no stable surface.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString AddSkinnedAccessory(const FString& BlueprintPath, const FString& StaticMeshPath, const FString& ComponentName, const FString& Mode = TEXT("surface"), const FString& SurfaceComponentsJson = TEXT("[\"Body\"]"), const FString& Bone = TEXT("spine_05"), const FString& RelativeJson = TEXT("{}"), const FString& OutMeshPath = TEXT(""));
+
+	/**
+	 * Garment intake: copy a marketplace garment into DestFolder as SKM_<Name> with its own material copies
+	 * (Materials/<material>_<Name>) and capped texture copies (Textures/, MaxTextureSize, virtual texture streaming
+	 * untouched), and point the mesh copy's slots at them, so the cook never pulls the pack's 4K material in through the
+	 * mesh. TextureVariant "2" swaps T_X_1_* (or T_X_*) for the pack's T_X_2_* colourway where it exists. Reports any pack
+	 * texture still referenced (a material instance copy keeps the pack parent's defaults). GeometryScript-free, but runs
+	 * in Content/Python/vmh_wardrobe.py.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString MakeGarmentVariant(const FString& SourceMeshPath, const FString& DestFolder, const FString& Name, const FString& TextureVariant = TEXT(""), int32 MaxTextureSize = 1024);
+
+	/**
+	 * Garment intake: give a mesh with no usable skinning (a Chaos outfit's render mesh is skinned to root only and
+	 * cannot be a leader-pose garment) the bones and weights of a skinned source in the same space (the body or outfit it
+	 * was made on). Writes a NEW mesh (OutMeshPath, default <target>_Skinned) with the source's skeleton; Method
+	 * "closest" (closest point on the source surface) or "inpaint" (smooth fill). Then fix_unevaluated_bone_weights and
+	 * attach it. A Chaos outfit made for another body shape is refitted by a throwaway build instead (see the skill).
+	 * Runs Content/Python/vmh_wardrobe.py on GeometryScript.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString TransferSkinWeights(const FString& TargetMeshPath, const FString& SourceMeshPath, const FString& OutMeshPath = TEXT(""), const FString& Method = TEXT("closest"));
 
 	/**
 	 * Redo the asset-level fixes a Creator rebuild throws away, on one built Blueprint (after build(..., preserve)):

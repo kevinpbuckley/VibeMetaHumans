@@ -3,7 +3,11 @@
 #include "Utils/VmhPreview.h"
 
 #include "Animation/AnimSequence.h"
+#include "Components/MeshComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "AssetCompilingManager.h"
+#include "ContentStreaming.h"
+#include "ShaderCompiler.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Dom/JsonObject.h"
@@ -19,6 +23,8 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "PreviewScene.h"
+#include "Rendering/SkeletalMeshLODRenderData.h"
+#include "Rendering/SkeletalMeshRenderData.h"
 #include "RenderingThread.h"
 #include "UObject/Package.h"
 
@@ -37,6 +43,39 @@ namespace VmhPreview
 		Scene.Reset();
 	}
 
+	UWorld* FCharacter::World()
+	{
+		if (!Scene)
+		{
+			Scene = MakeUnique<FPreviewScene>(FPreviewScene::ConstructionValues().SetSkyBrightness(1.0f).SetLightBrightness(3.0f));
+		}
+		return Scene->GetWorld();
+	}
+
+	void FCharacter::Adopt(AActor* InActor)
+	{
+		SpawnedActor = InActor;
+		BodyComponent = nullptr;
+		if (!InActor)
+		{
+			return;
+		}
+		TArray<USkeletalMeshComponent*> Skinned;
+		InActor->GetComponents(Skinned);
+		for (USkeletalMeshComponent* C : Skinned)
+		{
+			if (C->GetName() == BodyComponentName) { BodyComponent = C; }
+		}
+		TArray<UMeshComponent*> Meshes;
+		InActor->GetComponents(Meshes);
+		for (UMeshComponent* M : Meshes)
+		{
+			M->SetTextureForceResidentFlag(true);
+			M->PrestreamTextures(30.f, true);
+		}
+		Evaluate(0.f);
+	}
+
 	bool FCharacter::Spawn(UBlueprint* Blueprint, FString& OutError)
 	{
 		UClass* Class = Blueprint ? Blueprint->GeneratedClass.Get() : nullptr;
@@ -45,8 +84,7 @@ namespace VmhPreview
 			OutError = TEXT("not a compiled actor Blueprint");
 			return false;
 		}
-		Scene = MakeUnique<FPreviewScene>(FPreviewScene::ConstructionValues().SetSkyBrightness(0.8f).SetLightBrightness(2.0f));
-		UWorld* World = Scene->GetWorld();
+		UWorld* World = this->World();
 		FActorSpawnParameters Params;
 		Params.ObjectFlags = RF_Transient;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -72,6 +110,14 @@ namespace VmhPreview
 		{
 			OutError = FString::Printf(TEXT("the spawned Blueprint has no skeletal mesh component named %s"), *BodyComponentName);
 			return false;
+		}
+		// full-resolution textures for review captures (streaming placeholders drew a grey checker skin)
+		TArray<UMeshComponent*> Meshes;
+		SpawnedActor->GetComponents(Meshes);
+		for (UMeshComponent* M : Meshes)
+		{
+			M->SetTextureForceResidentFlag(true);
+			M->PrestreamTextures(30.f, true);
 		}
 		Evaluate(0.f);
 		return true;
@@ -152,11 +198,26 @@ namespace VmhPreview
 		{
 			return Pose;
 		}
-		const FReferenceSkeleton& Ref = BodyComponent->GetSkeletalMeshAsset()->GetRefSkeleton();
+		const USkeletalMesh* Mesh = BodyComponent->GetSkeletalMeshAsset();
+		const FReferenceSkeleton& Ref = Mesh->GetRefSkeleton();
 		const TArray<FTransform>& CS = BodyComponent->GetComponentSpaceTransforms();
-		for (int32 B = 0; B < Ref.GetNum() && B < CS.Num(); ++B)
+		// bones the LOD does not evaluate (the ~144 hand helpers of an Optimized body) hold stale transforms at the
+		// component origin: give them their reference offset from the (evaluated) parent, as the wardrobe skinning does
+		TSet<int32> Required;
+		const FSkeletalMeshRenderData* RenderData = Mesh->GetResourceForRendering();
+		const int32 Lod = FMath::Clamp(BodyComponent->GetPredictedLODLevel(), 0, RenderData ? RenderData->LODRenderData.Num() - 1 : 0);
+		if (RenderData && RenderData->LODRenderData.IsValidIndex(Lod))
 		{
-			Pose.BoneCS.Add(Ref.GetBoneName(B), CS[B]);
+			for (const FBoneIndexType B : RenderData->LODRenderData[Lod].RequiredBones) { Required.Add(B); }
+		}
+		TArray<FTransform> Out;
+		Out.SetNum(Ref.GetNum());
+		for (int32 B = 0; B < Ref.GetNum(); ++B)
+		{
+			const int32 Parent = Ref.GetParentIndex(B);
+			const bool bEvaluated = B < CS.Num() && (Required.Num() == 0 || Required.Contains(B));
+			Out[B] = bEvaluated ? CS[B] : (Parent == INDEX_NONE ? Ref.GetRefBonePose()[B] : Ref.GetRefBonePose()[B] * Out[Parent]);
+			Pose.BoneCS.Add(Ref.GetBoneName(B), Out[B]);
 		}
 		return Pose;
 	}
@@ -198,7 +259,7 @@ namespace VmhPreview
 		return Box.IsValid ? Box.ExpandBy(Pad) : Box;
 	}
 
-	bool FCharacter::Capture(const FVector& Eye, const FVector& Target, float FOVDegrees, int32 Width, int32 Height, float ExposureBias, TArray<FColor>& OutPixels, FString& OutError)
+	bool FCharacter::Capture(const FVector& Eye, const FVector& Target, float FOVDegrees, int32 Width, int32 Height, float ExposureBias, TArray<FColor>& OutPixels, FString& OutError, float OrthoWidth, bool bBaseColor, const FRotator& LightOffset)
 	{
 		if (!Scene || !Scene->GetWorld())
 		{
@@ -206,7 +267,7 @@ namespace VmhPreview
 			return false;
 		}
 		const FRotator Rotation = (Target - Eye).Rotation();
-		Scene->SetLightDirection(Rotation + FRotator(-25.f, 30.f, 0.f));
+		Scene->SetLightDirection(Rotation + LightOffset);
 		UTextureRenderTarget2D* RenderTarget = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), NAME_None, RF_Transient);
 		RenderTarget->RenderTargetFormat = RTF_RGBA8;
 		RenderTarget->ClearColor = FLinearColor(0.18f, 0.18f, 0.2f, 1.f);
@@ -214,21 +275,40 @@ namespace VmhPreview
 		RenderTarget->UpdateResourceImmediate(true);
 		USceneCaptureComponent2D* Capture = NewObject<USceneCaptureComponent2D>(GetTransientPackage(), NAME_None, RF_Transient);
 		Capture->TextureTarget = RenderTarget;
-		Capture->CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR;
+		Capture->CaptureSource = bBaseColor ? ESceneCaptureSource::SCS_BaseColor : ESceneCaptureSource::SCS_FinalToneCurveHDR;
 		Capture->bCaptureEveryFrame = false;
 		Capture->bCaptureOnMovement = false;
 		Capture->bAlwaysPersistRenderingState = true;
-		Capture->ProjectionType = ECameraProjectionMode::Perspective;
+		Capture->ProjectionType = OrthoWidth > 0.f ? ECameraProjectionMode::Orthographic : ECameraProjectionMode::Perspective;
 		Capture->FOVAngle = FOVDegrees;
+		Capture->OrthoWidth = OrthoWidth > 0.f ? OrthoWidth : Capture->OrthoWidth;
+		// fixed exposure, without the physical camera (with it the preview scene's lights rendered black)
 		Capture->PostProcessSettings.bOverride_AutoExposureMethod = true;
 		Capture->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+		Capture->PostProcessSettings.bOverride_AutoExposureApplyPhysicalCameraExposure = true;
+		Capture->PostProcessSettings.AutoExposureApplyPhysicalCameraExposure = false;
 		Capture->PostProcessSettings.bOverride_AutoExposureBias = true;
 		Capture->PostProcessSettings.AutoExposureBias = ExposureBias;
 		Scene->AddComponent(Capture, FTransform(Rotation, Eye));
 		Scene->GetWorld()->SendAllEndOfFrameUpdates();
-		// two captures: the first one after a pose change can still draw the previous skinning
+		// textures in (all mips) and several captures: the first one after a pose change can still draw the previous
+		// skinning, and virtual texture pages arrive through the feedback of earlier frames
+		// materials still compiling draw as the grey checker of the default material, and they are only queued when
+		// first drawn: one warm-up capture, then finish shaders and assets
 		Capture->CaptureScene();
 		FlushRenderingCommands();
+		FAssetCompilingManager::Get().FinishAllCompilation();
+		if (GShaderCompilingManager)
+		{
+			GShaderCompilingManager->FinishAllCompilation();
+		}
+		IStreamingManager::Get().StreamAllResources(5.0f);
+		for (int32 Frame = 0; Frame < 4; ++Frame)
+		{
+			Capture->CaptureScene();
+			FlushRenderingCommands();
+			IStreamingManager::Get().StreamAllResources(1.0f);
+		}
 		Capture->CaptureScene();
 		FlushRenderingCommands();
 		const bool bRead = UKismetRenderingLibrary::ReadRenderTarget(Capture, RenderTarget, OutPixels);

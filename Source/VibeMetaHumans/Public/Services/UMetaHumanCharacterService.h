@@ -124,6 +124,18 @@ public:
 	static FString GetFaceLandmarks(const FString& CharacterPath);
 
 	/**
+	 * The face-fit kit's front capture (Content/Python/vmh_facefit): the character's Creator editing actor spawned in a
+	 * private preview world (no level, no PIE), rendered orthographically front-on (camera on +Y, WidthCm across,
+	 * Size px square, centred on the face landmarks), written to OutDir/mh_<Tag>.png with mh_<Tag>.json - the meta file
+	 * fit.py reads: cm_per_px, centre_z, skip (ear/neck/skull landmarks), landmarks_cm and landmarks_px (every sculpt
+	 * landmark projected to pixels). bBaseColor captures unlit base colour (alpha is forced to 255: base-colour captures
+	 * come back with alpha 0). bTrack also runs MetaHuman's face contour tracker on the render (tracked_contours_px).
+	 * OutDir default Saved/VibeMetaHumans/FaceFit/<Character>.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Character")
+	static FString CaptureFaceForFit(const FString& CharacterPath, const FString& OutDir = TEXT(""), const FString& Tag = TEXT("front"), int32 Size = 768, float WidthCm = 30.f, bool bBaseColor = false, bool bTrack = true);
+
+	/**
 	 * Move sculpt landmarks toward targets and hold every other one in place, repeating translate+commit until
 	 * every residual is under ToleranceCm or MaxIterations runs out. TargetsJson: {"index":[dx,dy,dz]} cm deltas
 	 * (absolute positions instead when bAbsolute). HoldJson: "auto" (every non-target landmark, the default),

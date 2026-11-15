@@ -84,6 +84,7 @@
 #include "Utils/VmhAssets.h"
 #include "Utils/VmhBlueprintSnapshot.h"
 #include "Utils/VmhJson.h"
+#include "Utils/VmhPreview.h"
 #include "Services/UMetaHumanWardrobeService.h"
 #include "FileHelpers.h"
 #include "Misc/PackageName.h"
@@ -3707,4 +3708,120 @@ FString UMetaHumanCharacterService::ImportGroom(const FString& AlembicPath, cons
 	Out->SetNumberField(TEXT("hair_width_cm"), HairWidthCm > 0.f ? HairWidthCm : 0.f);
 	Out->SetStringField(TEXT("hint"), TEXT("save the groom in a LATER call (a groom saved in the call that changed it can deadlock the editor); attach it rigidly with add_groom_to_blueprint(SocketName='head', bInverseSocketTransform=true) - binding 40000 strands to a face mesh took 16+ minutes"));
 	return VmhJson::Ok(Out);
+}
+
+// =====================================================================================================================
+// capture_face_for_fit (the face-fit kit's front capture, 2026-11-14)
+// =====================================================================================================================
+
+FString UMetaHumanCharacterService::CaptureFaceForFit(const FString& CharacterPath, const FString& OutDir, const FString& Tag, int32 Size, float WidthCm, bool bBaseColor, bool bTrack)
+{
+	FEditContext Ctx = OpenForEdit(CharacterPath, true);
+	if (!Ctx.IsValid())
+	{
+		return Ctx.ToError();
+	}
+	TArray<FVector> Landmarks;
+	Ctx.Subsystem->GetFaceLandmarks(Ctx.Character, Landmarks);
+	if (Landmarks.Num() == 0)
+	{
+		return VmhJson::Error(TEXT("NO_LANDMARKS"), TEXT("the character returned no face landmarks"));
+	}
+	TArray<int32> Ears, Neck, Skull;
+	ClassifyLandmarks(Landmarks, Ears, Neck, Skull);
+	TSet<int32> Skip(Ears);
+	Skip.Append(Neck);
+	Skip.Append(Skull);
+	double MinZ = TNumericLimits<double>::Max(), MaxZ = -TNumericLimits<double>::Max();
+	for (int32 I = 0; I < Landmarks.Num(); ++I)
+	{
+		if (!Skip.Contains(I)) { MinZ = FMath::Min(MinZ, Landmarks[I].Z); MaxZ = FMath::Max(MaxZ, Landmarks[I].Z); }
+	}
+	const double CenterZ = (MinZ + MaxZ) * 0.5;
+	const int32 ImageSize = FMath::Clamp(Size, 256, 4096);
+	const double Width = WidthCm > 1.f ? WidthCm : 30.0;
+
+	// the Creator's own editing actor, spawned in a private world: no level, no PIE, and none of the "capture in the
+	// same call as spawn_in_level is empty" trouble of a level actor
+	VmhPreview::FCharacter Preview;
+	UWorld* World = Preview.World();
+	TScriptInterface<IMetaHumanCharacterEditorActorInterface> EditorActor = World ? Ctx.Subsystem->CreateMetaHumanCharacterEditorActor(Ctx.Character, World) : TScriptInterface<IMetaHumanCharacterEditorActorInterface>();
+	AActor* Actor = Cast<AActor>(EditorActor.GetObject());
+	if (!Actor)
+	{
+		return VmhJson::Error(TEXT("SPAWN_FAILED"), TEXT("the Creator could not spawn its editing actor in a preview world"));
+	}
+	Preview.Adopt(Actor);
+	TArray<FColor> Pixels;
+	FString Error;
+	if (!Preview.Capture(FVector(0.0, 150.0, CenterZ), FVector(0.0, 0.0, CenterZ), 30.f, ImageSize, ImageSize, 0.f, Pixels, Error, static_cast<float>(Width), bBaseColor, FRotator(-12.f, 0.f, 0.f)))
+	{
+		return VmhJson::Error(TEXT("CAPTURE_FAILED"), Error);
+	}
+	const FString Dir = OutDir.IsEmpty() ? FPaths::ProjectSavedDir() / TEXT("VibeMetaHumans") / TEXT("FaceFit") / Ctx.Character->GetName() : OutDir;
+	const FString Name = Tag.IsEmpty() ? TEXT("mh_front") : TEXT("mh_") + Tag;
+	const FString PngPath = Dir / (Name + TEXT(".png"));
+	if (!VmhPreview::SavePng(PngPath, ImageSize, ImageSize, Pixels, Error))
+	{
+		return VmhJson::Error(TEXT("WRITE_FAILED"), Error);
+	}
+	// camera at +Y looking at the face: +X is screen right, +Z up
+	const double CmPerPx = Width / ImageSize;
+	TSharedPtr<FJsonObject> Cm = VmhJson::Obj(), Px = VmhJson::Obj();
+	for (int32 I = 0; I < Landmarks.Num(); ++I)
+	{
+		const FVector& L = Landmarks[I];
+		Cm->SetArrayField(FString::FromInt(I), { MakeShared<FJsonValueNumber>(L.X), MakeShared<FJsonValueNumber>(L.Y), MakeShared<FJsonValueNumber>(L.Z) });
+		Px->SetArrayField(FString::FromInt(I), { MakeShared<FJsonValueNumber>(ImageSize * 0.5 + L.X / CmPerPx), MakeShared<FJsonValueNumber>(ImageSize * 0.5 - (L.Z - CenterZ) / CmPerPx) });
+	}
+	// the meta file fit.py reads (Content/Python/vmh_facefit)
+	TSharedPtr<FJsonObject> Meta = VmhJson::Obj();
+	Meta->SetNumberField(TEXT("cm_per_px"), CmPerPx);
+	Meta->SetNumberField(TEXT("centre_x"), 0.0);
+	Meta->SetNumberField(TEXT("centre_z"), CenterZ);
+	Meta->SetNumberField(TEXT("size"), ImageSize);
+	Meta->SetNumberField(TEXT("x_sign"), 1);
+	TArray<int32> SkipList = Skip.Array();
+	SkipList.Sort();
+	Meta->SetArrayField(TEXT("skip"), IntArray(SkipList));
+	Meta->SetObjectField(TEXT("landmarks_cm"), Cm);
+	Meta->SetObjectField(TEXT("landmarks_px"), Px);
+	const FString MetaPath = Dir / (Name + TEXT(".json"));
+	FFileHelper::SaveStringToFile(VmhJson::Stringify(Meta), *MetaPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	Out->SetStringField(TEXT("image"), PngPath);
+	Out->SetStringField(TEXT("meta"), MetaPath);
+	Out->SetNumberField(TEXT("size"), ImageSize);
+	Out->SetNumberField(TEXT("cm_per_px"), CmPerPx);
+	Out->SetNumberField(TEXT("centre_z"), CenterZ);
+	Out->SetNumberField(TEXT("landmarks"), Landmarks.Num());
+	Out->SetArrayField(TEXT("skip"), IntArray(SkipList));
+	Out->SetObjectField(TEXT("landmarks_px"), Px);
+	if (bTrack && !bBaseColor)
+	{
+		// MetaHuman's own face contour tracker on the render (the Mesh Import tool's dense contours), in pixels
+		TMap<FString, FTrackingPoints> Curves;
+		FString TrackError;
+		if (TrackDenseContours(Pixels, ImageSize, ImageSize, Curves, TrackError))
+		{
+			TSharedPtr<FJsonObject> C = VmhJson::Obj();
+			for (const TPair<FString, FTrackingPoints>& Pair : Curves)
+			{
+				TArray<TSharedPtr<FJsonValue>> Points;
+				for (const FVector2D& P : Pair.Value.TrackingPoints)
+				{
+					Points.Add(MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{ MakeShared<FJsonValueNumber>(FMath::RoundToDouble(P.X * 10.0) / 10.0), MakeShared<FJsonValueNumber>(FMath::RoundToDouble(P.Y * 10.0) / 10.0) }));
+				}
+				C->SetArrayField(Pair.Key, Points);
+			}
+			Out->SetObjectField(TEXT("tracked_contours_px"), C);
+		}
+		else
+		{
+			Out->SetStringField(TEXT("tracking_error"), TrackError);
+		}
+	}
+	Out->SetStringField(TEXT("hint"), TEXT("measure the render and the reference photo with Content/Python/vmh_facefit/measure.py (MediaPipe, outside the editor), then fit.py <ref.json> <render.json> <meta> <png> <deltas.json> and move_face_landmarks with the deltas; capture again and repeat"));
+	return CharacterResult(Ctx, Out);
 }

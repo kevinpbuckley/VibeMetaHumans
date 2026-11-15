@@ -10,6 +10,7 @@ class FPreviewScene;
 class UAnimSequence;
 class UBlueprint;
 class USkeletalMeshComponent;
+class UWorld;
 
 /**
  * A built MetaHuman Blueprint spawned in a private preview world and posed the way the game poses it (2026-11-14).
@@ -32,6 +33,12 @@ namespace VmhPreview
 		/** Spawn the Blueprint's class in a new preview world (lit by a soft key and a sky light). */
 		bool Spawn(UBlueprint* Blueprint, FString& OutError);
 
+		/** The preview world (created on first use), for actors spawned by someone else (the Creator's editing actor). */
+		UWorld* World();
+
+		/** Use an actor already spawned in World() (its skeletal mesh component BodyComponentName is the body, if any). */
+		void Adopt(AActor* InActor);
+
 		/** Play Anim on the body component at Time (nullptr: the rest / Blueprint pose) and evaluate every anim graph. */
 		bool Pose(UAnimSequence* Anim, double Time, FString& OutError);
 
@@ -46,10 +53,11 @@ namespace VmhPreview
 		FBox BoneBox(const TArray<FName>& Bones, double Pad) const;
 
 		/**
-		 * Render a view with a scene capture. Camera at Eye looking at Target, FOVDegrees horizontal. Pixels are
-		 * RGBA8 with alpha forced to 255 (captures of base colour come back with alpha 0).
+		 * Render a view with a scene capture. Camera at Eye looking at Target, FOVDegrees horizontal (or orthographic,
+		 * OrthoWidth cm across, when OrthoWidth > 0); bBaseColor captures unlit base colour; the key light comes from the view direction turned by LightOffset. Pixels are RGBA8 with alpha
+		 * forced to 255 (captures come back with alpha 0, base colour especially).
 		 */
-		bool Capture(const FVector& Eye, const FVector& Target, float FOVDegrees, int32 Width, int32 Height, float ExposureBias, TArray<FColor>& OutPixels, FString& OutError);
+		bool Capture(const FVector& Eye, const FVector& Target, float FOVDegrees, int32 Width, int32 Height, float ExposureBias, TArray<FColor>& OutPixels, FString& OutError, float OrthoWidth = 0.f, bool bBaseColor = false, const FRotator& LightOffset = FRotator(-25.f, 30.f, 0.f));
 
 		USkeletalMeshComponent* Body() const { return BodyComponent; }
 		AActor* Actor() const { return SpawnedActor; }

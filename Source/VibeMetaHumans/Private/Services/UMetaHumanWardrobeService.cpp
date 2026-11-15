@@ -17,8 +17,10 @@
 #include "Engine/SkeletalMeshSocket.h"
 #include "Engine/SkinnedAssetCommon.h"
 #include "PhysicsEngine/PhysicsAsset.h"
+#include "Components/PrimitiveComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DNA.h"
+#include "Editor.h"
 #include "Dom/JsonValue.h"
 #include "EditorAssetLibrary.h"
 #include "Engine/Blueprint.h"
@@ -30,6 +32,7 @@
 #include "GroomAssetInterpolation.h"
 #include "GroomAssetMeshes.h"
 #include "HAL/FileManager.h"
+#include "IPythonScriptPlugin.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/FileHelper.h"
@@ -1111,12 +1114,22 @@ FString UMetaHumanWardrobeService::HideBodyUnderGarments(const FString& Blueprin
 	{
 		return VmhJson::Error(TEXT("COMPONENT_NOT_FOUND"), Error);
 	}
-	const FString SourcePath = OptStr(Options, TEXT("source_body"), BodyComp.Mesh->GetPathName());
+	// the mesh that is cut: the body, or (trim_inner_garment) an inner garment under outer ones; poses always come from
+	// the body (the leader) and the target is skinned as its follower
+	FComp TargetComp = BodyComp;
+	const FString TargetName = OptStr(Options, TEXT("target_component"), TEXT(""));
+	if (!TargetName.IsEmpty() && !FindComp(Blueprint, TargetName, TargetComp, Error))
+	{
+		return VmhJson::Error(TEXT("COMPONENT_NOT_FOUND"), Error);
+	}
+	const FTransform TargetToLeader = CompToLeader(Blueprint, TargetComp, BodyComp);
+	const FString SourcePath = OptStr(Options, TEXT("source_body"), TargetComp.Mesh->GetPathName());
 	USkeletalMesh* Source = VmhAssets::Load<USkeletalMesh>(SourcePath);
 	if (!Source)
 	{
-		return VmhJson::Error(TEXT("MESH_NOT_FOUND"), FString::Printf(TEXT("No source body at %s"), *SourcePath));
+		return VmhJson::Error(TEXT("MESH_NOT_FOUND"), FString::Printf(TEXT("No source mesh at %s"), *SourcePath));
 	}
+	const int32 MinFragment = static_cast<int32>(OptNum(Options, TEXT("min_fragment"), 0));
 	FString OutPackage, OutName, SrcPackage, SrcName;
 	VmhAssets::SplitAssetPath(OutBodyMeshPath, OutPackage, OutName);
 	VmhAssets::SplitAssetPath(Source->GetPathName(), SrcPackage, SrcName);
@@ -1152,6 +1165,10 @@ FString UMetaHumanWardrobeService::HideBodyUnderGarments(const FString& Blueprin
 		{
 			return VmhJson::Error(TEXT("COMPONENT_NOT_FOUND"), Error);
 		}
+		if (G.Comp.Node == TargetComp.Node)
+		{
+			return VmhJson::Error(TEXT("BAD_ARGS"), FString::Printf(TEXT("%s is the mesh being cut; list only the garments over it"), *G.Name));
+		}
 		G.ToLeader = CompToLeader(Blueprint, G.Comp, BodyComp);
 		FMeshDescription Unused;
 		if (!ReadLod(G.Comp.Mesh, 0, Unused, G.Geom, Error))
@@ -1162,7 +1179,7 @@ FString UMetaHumanWardrobeService::HideBodyUnderGarments(const FString& Blueprin
 	}
 
 	TArray<FPose> Poses;
-	if (!ReadPoses(Options, BodyComp.Mesh, Poses, Error))
+	if (!ReadPoses(Options, BodyComp.Mesh, Poses, Error, Blueprint))
 	{
 		return VmhJson::Error(TEXT("BAD_POSE"), Error);
 	}
@@ -1221,7 +1238,7 @@ FString UMetaHumanWardrobeService::HideBodyUnderGarments(const FString& Blueprin
 		for (int32 P = 0; P < Poses.Num(); ++P)
 		{
 			TArray<FVector3d> X, N;
-			SkinFollower(Geom, Source, Poses[P], FTransform::Identity, X);
+			SkinFollower(Geom, Source, Poses[P], TargetToLeader, X);
 			VertexNormals(X, Geom.Tris, N);
 			for (int32 V = 0; V < NV; ++V)
 			{
@@ -1272,6 +1289,44 @@ FString UMetaHumanWardrobeService::HideBodyUnderGarments(const FString& Blueprin
 			}
 			if (bDel) { Delete.Add(Geom.TriIds[T]); }
 		}
+		// stray islands the cut leaves (a few triangles of shirt floating inside the jacket)
+		int32 NFragment = 0;
+		if (MinFragment > 0)
+		{
+			TSet<FTriangleID> Deleted(Delete);
+			TArray<int32> Comp;
+			Comp.Init(INDEX_NONE, NT);
+			TMultiMap<int32, int32> TrisOfVertex;
+			for (int32 T = 0; T < NT; ++T)
+			{
+				if (Deleted.Contains(Geom.TriIds[T])) { continue; }
+				TrisOfVertex.Add(Geom.Tris[T].X, T); TrisOfVertex.Add(Geom.Tris[T].Y, T); TrisOfVertex.Add(Geom.Tris[T].Z, T);
+			}
+			for (int32 Seed = 0; Seed < NT; ++Seed)
+			{
+				if (Comp[Seed] != INDEX_NONE || Deleted.Contains(Geom.TriIds[Seed])) { continue; }
+				TArray<int32> Island, Stack = { Seed };
+				Comp[Seed] = Seed;
+				while (Stack.Num() > 0)
+				{
+					const int32 T = Stack.Pop(EAllowShrinking::No);
+					Island.Add(T);
+					for (const int32 Corner : { Geom.Tris[T].X, Geom.Tris[T].Y, Geom.Tris[T].Z })
+					{
+						for (auto It = TrisOfVertex.CreateConstKeyIterator(Corner); It; ++It)
+						{
+							if (Comp[It.Value()] == INDEX_NONE) { Comp[It.Value()] = Seed; Stack.Add(It.Value()); }
+						}
+					}
+				}
+				if (Island.Num() <= MinFragment && Island.Num() < NT - Delete.Num())
+				{
+					for (const int32 T : Island) { Delete.Add(Geom.TriIds[T]); }
+					NFragment += Island.Num();
+				}
+			}
+		}
+		R->SetNumberField(TEXT("deleted_fragments"), NFragment);
 		R->SetNumberField(TEXT("triangles"), NT);
 		R->SetNumberField(TEXT("covered_inside_or_shell"), N1);
 		R->SetNumberField(TEXT("covered_by_rays"), N2);
@@ -1305,11 +1360,12 @@ FString UMetaHumanWardrobeService::HideBodyUnderGarments(const FString& Blueprin
 		Out->SetStringField(TEXT("dressed_body"), Dressed->GetPathName());
 		if (bAssignToBlueprint)
 		{
-			AssignMesh(Blueprint, BodyComp.Template, Dressed);
+			AssignMesh(Blueprint, TargetComp.Template, Dressed);
 			Out->SetBoolField(TEXT("assigned"), true);
 		}
 	}
-	Out->SetStringField(TEXT("hint"), TEXT("look at it standing AND in the seated pose before keeping it; save the dressed body (and the Blueprint when assigned)"));
+	Out->SetStringField(TEXT("target_component"), TargetComp.Node->GetVariableName().ToString());
+	Out->SetStringField(TEXT("hint"), TEXT("deleting skin is for closed garments (trousers, shoes, long sleeves under a jacket); under a dress or an open garment use push_body_under_garments (a deleted patch shows as a hole from a low camera). Look at it standing AND seated (capture_fit_views) before keeping it; save the result (and the Blueprint when assigned)"));
 	return VmhJson::Ok(Out);
 }
 
@@ -1369,7 +1425,7 @@ FString UMetaHumanWardrobeService::PushGarmentOutOfMesh(const FString& Blueprint
 	}
 
 	TArray<FPose> Poses;
-	if (!ReadPoses(Options, BodyComp.Mesh, Poses, Error))
+	if (!ReadPoses(Options, BodyComp.Mesh, Poses, Error, Blueprint))
 	{
 		return VmhJson::Error(TEXT("BAD_POSE"), Error);
 	}
@@ -2270,4 +2326,870 @@ FString UMetaHumanWardrobeService::AuditPlacedInstances(const FString& Blueprint
 		: bClearOverrides ? TEXT("save the level (and its external actor packages) to keep the cleared values")
 		                  : TEXT("an override of a mesh, material or anim class hides every Blueprint fix from that actor: clear it (bClearOverrides) unless it is meant"));
 	return VmhJson::Ok(Out);
+}
+
+// =====================================================================================================================
+// trim_inner_garment
+// =====================================================================================================================
+
+FString UMetaHumanWardrobeService::TrimInnerGarment(const FString& BlueprintPath, const FString& InnerComponent, const FString& OuterComponentsJson, const FString& OutMeshPath, const FString& OptionsJson, bool bAssignToBlueprint, bool bDryRun)
+{
+	FString Error;
+	TSharedPtr<FJsonObject> Options = VmhJson::Parse(OptionsJson, Error);
+	if (!Options.IsValid())
+	{
+		return VmhJson::Error(TEXT("BAD_OPTIONS"), Error);
+	}
+	// the jam's shirt-under-jacket values: a thin shell, a stricter winding, no ray hits far outside, small islands go
+	const TPair<const TCHAR*, double> Defaults[] = { { TEXT("shell"), 0.6 }, { TEXT("winding"), 0.6 }, { TEXT("contract"), 2 },
+		{ TEXT("ray_out"), 5.0 }, { TEXT("ray_in"), 3.0 }, { TEXT("ray_contract"), 1 }, { TEXT("min_fragment"), 40 } };
+	for (const TPair<const TCHAR*, double>& D : Defaults)
+	{
+		if (!Options->HasField(D.Key)) { Options->SetNumberField(D.Key, D.Value); }
+	}
+	Options->SetStringField(TEXT("target_component"), InnerComponent);
+	if (!Options->HasField(TEXT("source_body")))
+	{
+		// every run starts from the inner component's current mesh unless a source is given (pass the uncut copy on re-runs)
+		UBlueprint* Blueprint = VmhAssets::Load<UBlueprint>(BlueprintPath);
+		FComp Inner;
+		if (Blueprint && FindComp(Blueprint, InnerComponent, Inner, Error))
+		{
+			Options->SetStringField(TEXT("source_body"), Inner.Mesh->GetPathName());
+		}
+	}
+	return HideBodyUnderGarments(BlueprintPath, OuterComponentsJson, OutMeshPath, VmhJson::Stringify(Options), bAssignToBlueprint, bDryRun);
+}
+
+// =====================================================================================================================
+// push_body_under_garments / measure_poke_through
+// =====================================================================================================================
+
+namespace
+{
+	/** Garments posed per pose, as one combined soup or one soup each, plus the leader's bone segments. */
+	struct FPosedGarments
+	{
+		TArray<FString> Names;
+		TArray<TArray<FSoup>> Each;        // [pose][garment]
+		TArray<FSoup> All;                 // [pose]
+		TArray<TArray<TPair<FVector3d, FVector3d>>> Segments; // [pose]
+	};
+
+	bool PoseGarments(UBlueprint* Blueprint, const FComp& BodyComp, const FString& GarmentComponentsJson, const TArray<FPose>& Poses, bool bEach, FPosedGarments& Out, FString& OutError)
+	{
+		TArray<TSharedPtr<FJsonValue>> List;
+		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(GarmentComponentsJson), List) || List.Num() == 0)
+		{
+			OutError = TEXT("GarmentComponentsJson is a JSON array of component names, e.g. [\"G_Dress\"]");
+			return false;
+		}
+		struct FG { FComp Comp; FTransform ToLeader; FLodGeom Geom; };
+		TArray<FG> Gs;
+		for (const TSharedPtr<FJsonValue>& V : List)
+		{
+			const FString Name = V->Type == EJson::Object ? V->AsObject()->GetStringField(TEXT("component")) : V->AsString();
+			FG G;
+			if (!FindComp(Blueprint, Name, G.Comp, OutError))
+			{
+				return false;
+			}
+			FMeshDescription Unused;
+			if (!ReadLod(G.Comp.Mesh, 0, Unused, G.Geom, OutError))
+			{
+				return false;
+			}
+			G.ToLeader = CompToLeader(Blueprint, G.Comp, BodyComp);
+			Out.Names.Add(Name);
+			Gs.Add(MoveTemp(G));
+		}
+		Out.Each.SetNum(Poses.Num());
+		Out.All.SetNum(Poses.Num());
+		Out.Segments.SetNum(Poses.Num());
+		for (int32 P = 0; P < Poses.Num(); ++P)
+		{
+			TArray<FVector3d> AllPos;
+			TArray<FIntVector3> AllTris;
+			for (const FG& G : Gs)
+			{
+				TArray<FVector3d> X;
+				SkinFollower(G.Geom, G.Comp.Mesh, Poses[P], G.ToLeader, X);
+				if (bEach) { Out.Each[P].AddDefaulted_GetRef().Build(X, G.Geom.Tris, false); }
+				const int32 Base = AllPos.Num();
+				AllPos.Append(X);
+				for (const FIntVector3& T : G.Geom.Tris) { AllTris.Add(FIntVector3(T.X + Base, T.Y + Base, T.Z + Base)); }
+			}
+			Out.All[P].Build(AllPos, AllTris, false);
+			BoneSegments(BodyComp.Mesh->GetRefSkeleton(), Poses[P], Out.Segments[P]);
+		}
+		return true;
+	}
+
+	/** Which body vertices may move: not excluded by box or dominant bone, inside only_boxes when given. */
+	TArray<bool> PushCandidates(const FLodGeom& Geom, const FReferenceSkeleton& Ref, const TSharedPtr<FJsonObject>& Options, TArray<double>& OutLimit, FString& OutError)
+	{
+		TArray<FBox3d> Only, Exclude;
+		ParseBoxes(OptArr(Options, TEXT("only_boxes")), Only, OutError);
+		ParseBoxes(OptArr(Options, TEXT("exclude_boxes")), Exclude, OutError);
+		TArray<FString> ExcludeBones;
+		const TArray<TSharedPtr<FJsonValue>> BoneList = Options->HasField(TEXT("exclude_bones")) ? OptArr(Options, TEXT("exclude_bones"))
+			: TArray<TSharedPtr<FJsonValue>>();
+		for (const TSharedPtr<FJsonValue>& B : BoneList) { ExcludeBones.Add(B->AsString()); }
+		if (!Options->HasField(TEXT("exclude_bones")))
+		{
+			// the face mesh covers head and neck; hands lie ON the cloth (a hand on the lap is not poke-through)
+			ExcludeBones = { TEXT("head"), TEXT("neck_*"), TEXT("FACIAL_*"), TEXT("hand_*"), TEXT("thumb_*"), TEXT("index_*"), TEXT("middle_*"), TEXT("ring_*"), TEXT("pinky_*") };
+		}
+		const double MaxPush = OptNum(Options, TEXT("max_push"), 5.0);
+		struct FLimit { FBox3d Box; double Max; };
+		TArray<FLimit> Limits;
+		for (const TSharedPtr<FJsonValue>& L : OptArr(Options, TEXT("limits")))
+		{
+			const TSharedPtr<FJsonObject> O = L->AsObject();
+			TArray<FBox3d> Box;
+			if (O.IsValid() && O->HasField(TEXT("box")) && ParseBoxes({ O->TryGetField(TEXT("box")) }, Box, OutError) && Box.Num() == 1)
+			{
+				Limits.Add({ Box[0], OptNum(O, TEXT("max_push"), MaxPush) });
+			}
+		}
+		const int32 NV = Geom.BindPos.Num();
+		TArray<bool> Cand;
+		Cand.Init(true, NV);
+		OutLimit.Init(MaxPush, NV);
+		for (int32 V = 0; V < NV; ++V)
+		{
+			const FVector3d& P = Geom.BindPos[V];
+			if (Only.Num() > 0 && !Only.ContainsByPredicate([&P](const FBox3d& B) { return B.IsInsideOrOn(P); })) { Cand[V] = false; continue; }
+			if (Exclude.ContainsByPredicate([&P](const FBox3d& B) { return B.IsInsideOrOn(P); })) { Cand[V] = false; continue; }
+			int32 Dominant = INDEX_NONE;
+			float Best = 0.f;
+			for (const TPair<int32, float>& W : Geom.Weights[V]) { if (W.Value > Best) { Best = W.Value; Dominant = W.Key; } }
+			if (Dominant != INDEX_NONE && Dominant < Ref.GetNum())
+			{
+				const FString Bone = Ref.GetBoneName(Dominant).ToString();
+				if (ExcludeBones.ContainsByPredicate([&Bone](const FString& Pattern) { return Bone.MatchesWildcard(Pattern); })) { Cand[V] = false; continue; }
+			}
+			for (const FLimit& L : Limits) { if (L.Box.IsInsideOrOn(P)) { OutLimit[V] = FMath::Min(OutLimit[V], L.Max); } }
+		}
+		return Cand;
+	}
+
+	struct FPokeResult
+	{
+		TArray<double> Depth;     // per vertex, worst over poses (> 0: the skin is outside the garment), -inf when not under it
+		TArray<int32> WorstPose;  // per vertex
+		TArray<double> PoseMax;   // per pose
+		TArray<int32> PoseCount;  // per pose: vertices outside the garment
+	};
+
+	/**
+	 * How far each candidate body vertex comes out through the garments, per pose. The garment's outward normal is
+	 * taken away from the nearest bone (never from its winding); a vertex counts only when skin and cloth face the same
+	 * way (an arm hanging beside a skirt faces it) and the nearest garment point lies along that normal (not a hem or
+	 * neckline edge off to the side); skin more than max_depth outside is exposed skin, not poke-through.
+	 */
+	FPokeResult MeasurePoke(const FLodGeom& Geom, const USkeletalMesh* Source, const TArray<FVector3d>& Bind, const TArray<FPose>& Poses, const TArray<FSoup>& Soups,
+		const TArray<TArray<TPair<FVector3d, FVector3d>>>& Segments, const TArray<bool>& Cand, const FTransform& ToLeader, double Reach, double MaxDepth, double FacingMin)
+	{
+		const int32 NV = Geom.BindPos.Num();
+		FPokeResult R;
+		R.Depth.Init(-TNumericLimits<double>::Max(), NV);
+		R.WorstPose.Init(INDEX_NONE, NV);
+		R.PoseMax.Init(-TNumericLimits<double>::Max(), Poses.Num());
+		R.PoseCount.Init(0, Poses.Num());
+		for (int32 P = 0; P < Poses.Num(); ++P)
+		{
+			TArray<FVector3d> X, Undented, N;
+			SkinFollower(Geom, Source, Poses[P], ToLeader, X, nullptr, &Bind);
+			SkinFollower(Geom, Source, Poses[P], ToLeader, Undented);   // the measuring normals: a dent tilts its own
+			VertexNormals(Undented, Geom.Tris, N);
+			for (int32 V = 0; V < NV; ++V)
+			{
+				if (!Cand[V] || N[V].IsNearlyZero())
+				{
+					continue;
+				}
+				FVector3d S, Ng; int32 Tri; double Dist;
+				if (!Soups[P].Nearest(X[V], Reach, S, Ng, Tri, Dist) || Ng.IsNearlyZero())
+				{
+					continue;
+				}
+				if ((Ng | (S - NearestBonePoint(Segments[P], S))) < 0.0)
+				{
+					Ng = -Ng;
+				}
+				if ((N[V] | Ng) < FacingMin)
+				{
+					continue;
+				}
+				const FVector3d Off = X[V] - S;
+				const double D = Off | Ng;
+				if ((D > 0.05 && D < 0.85 * Off.Size()) || D > MaxDepth)
+				{
+					continue;
+				}
+				if (D > R.Depth[V]) { R.Depth[V] = D; R.WorstPose[V] = P; }
+				R.PoseMax[P] = FMath::Max(R.PoseMax[P], D);
+				R.PoseCount[P] += D > 0.0 ? 1 : 0;
+			}
+		}
+		return R;
+	}
+}
+
+FString UMetaHumanWardrobeService::PushBodyUnderGarments(const FString& BlueprintPath, const FString& GarmentComponentsJson, const FString& OutBodyMeshPath, const FString& OptionsJson, bool bAssignToBlueprint, bool bDryRun)
+{
+	UBlueprint* Blueprint = VmhAssets::Load<UBlueprint>(BlueprintPath);
+	if (!Blueprint || !Blueprint->SimpleConstructionScript)
+	{
+		return VmhJson::Error(TEXT("BLUEPRINT_NOT_FOUND"), FString::Printf(TEXT("No Blueprint with a construction script at %s"), *BlueprintPath));
+	}
+	FString Error;
+	const TSharedPtr<FJsonObject> Options = VmhJson::Parse(OptionsJson, Error);
+	if (!Options.IsValid())
+	{
+		return VmhJson::Error(TEXT("BAD_OPTIONS"), Error);
+	}
+	FComp BodyComp;
+	if (!FindComp(Blueprint, OptStr(Options, TEXT("body_component"), TEXT("Body")), BodyComp, Error))
+	{
+		return VmhJson::Error(TEXT("COMPONENT_NOT_FOUND"), Error);
+	}
+	USkeletalMesh* Source = VmhAssets::Load<USkeletalMesh>(OptStr(Options, TEXT("source_body"), BodyComp.Mesh->GetPathName()));
+	if (!Source)
+	{
+		return VmhJson::Error(TEXT("MESH_NOT_FOUND"), TEXT("no source body (options.source_body: the uncut full body from make_full_body_from_dna)"));
+	}
+	FString OutPackage, OutName, SrcPackage, SrcName;
+	VmhAssets::SplitAssetPath(OutBodyMeshPath, OutPackage, OutName);
+	VmhAssets::SplitAssetPath(Source->GetPathName(), SrcPackage, SrcName);
+	if (OutBodyMeshPath.IsEmpty() || (OutPackage / OutName) == (SrcPackage / SrcName))
+	{
+		return VmhJson::Error(TEXT("BAD_ARGS"), TEXT("OutBodyMeshPath is required and must differ from the source body (every run starts again from the source)"));
+	}
+	if (!bDryRun && !IsEditablePath(OutPackage / OutName))
+	{
+		return VmhJson::Error(TEXT("PROTECTED_ASSET"), TEXT("OutBodyMeshPath must be under /Game (and not /Game/Fab)"));
+	}
+	TArray<FPose> Poses;
+	if (!ReadPoses(Options, BodyComp.Mesh, Poses, Error, Blueprint, TEXT("runtime")))
+	{
+		return VmhJson::Error(TEXT("BAD_POSE"), Error);
+	}
+	FPosedGarments Garments;
+	if (!PoseGarments(Blueprint, BodyComp, GarmentComponentsJson, Poses, false, Garments, Error))
+	{
+		return VmhJson::Error(TEXT("BAD_ARGS"), Error);
+	}
+	const double Margin = OptNum(Options, TEXT("margin"), 0.6);
+	const double Reach = OptNum(Options, TEXT("reach"), 6.0);
+	const double MaxDepth = OptNum(Options, TEXT("max_depth"), 2.0);
+	const double FacingMin = OptNum(Options, TEXT("facing"), 0.3);
+	const int32 Passes = FMath::Max(1, static_cast<int32>(OptNum(Options, TEXT("passes"), 4)));
+	const int32 Rings = static_cast<int32>(OptNum(Options, TEXT("spread_rings"), 3));
+	const double Falloff = OptNum(Options, TEXT("spread_falloff"), 0.7);
+
+	TMap<int32, FMeshDescription> Edited;
+	TArray<TSharedPtr<FJsonValue>> LodReports;
+	for (const int32 Lod : OptLods(Options, Source->GetLODNum()))
+	{
+		TSharedPtr<FJsonObject> R = VmhJson::Obj();
+		R->SetNumberField(TEXT("lod"), Lod);
+		FMeshDescription Desc;
+		FLodGeom Geom;
+		if (!ReadLod(Source, Lod, Desc, Geom, Error))
+		{
+			R->SetStringField(TEXT("skipped"), Error);
+			LodReports.Add(MakeShared<FJsonValueObject>(R));
+			continue;
+		}
+		const int32 NV = Geom.BindPos.Num();
+		TArray<double> Limit;
+		const TArray<bool> Cand = PushCandidates(Geom, Source->GetRefSkeleton(), Options, Limit, Error);
+		TArray<FVector3d> RestNormal;
+		VertexNormals(Geom.BindPos, Geom.Tris, RestNormal);
+		TArray<double> Push;
+		Push.Init(0.0, NV);
+		TArray<FVector3d> Bind = Geom.BindPos;
+		TArray<TSharedPtr<FJsonValue>> PassReports;
+		int32 PokingBefore = 0, PokingAfter = 0;
+		double WorstBefore = 0.0, WorstAfter = 0.0;
+		for (int32 Pass = 0; Pass <= Passes; ++Pass)
+		{
+			for (int32 V = 0; V < NV; ++V) { Bind[V] = Geom.BindPos[V] - RestNormal[V] * Push[V]; }
+			const FPokeResult M = MeasurePoke(Geom, Source, Bind, Poses, Garments.All, Garments.Segments, Cand, FTransform::Identity, Reach, MaxDepth, FacingMin);
+			int32 Poking = 0, Within = 0;
+			double Worst = 0.0;
+			TArray<double> Need;
+			Need.Init(0.0, NV);
+			for (int32 V = 0; V < NV; ++V)
+			{
+				if (M.Depth[V] > 0.0) { ++Poking; Worst = FMath::Max(Worst, M.Depth[V]); }
+				if (M.Depth[V] > -Margin && Push[V] < Limit[V] - 1e-4) { ++Within; Need[V] = M.Depth[V] + Margin; }
+			}
+			TSharedPtr<FJsonObject> PR = VmhJson::Obj();
+			PR->SetNumberField(TEXT("pass"), Pass);
+			PR->SetNumberField(TEXT("outside_garment"), Poking);
+			PR->SetNumberField(TEXT("within_margin"), Within);
+			PR->SetNumberField(TEXT("worst_cm"), Worst);
+			PassReports.Add(MakeShared<FJsonValueObject>(PR));
+			if (Pass == 0) { PokingBefore = Poking; WorstBefore = Worst; }
+			PokingAfter = Poking;
+			WorstAfter = Worst;
+			if (Within == 0 || Pass == Passes || bDryRun)
+			{
+				break;
+			}
+			// spread the push over a few rings of candidates so it leaves no crease; never less than a vertex needs
+			TArray<double> Add = Need;
+			for (int32 Ring = 0; Ring < Rings; ++Ring)
+			{
+				TArray<double> Next = Add;
+				for (int32 V = 0; V < NV; ++V)
+				{
+					if (!Cand[V]) { continue; }
+					for (const int32 Nb : Geom.Neighbors[V]) { Next[V] = FMath::Max(Next[V], Add[Nb] * Falloff); }
+				}
+				Add = MoveTemp(Next);
+			}
+			for (int32 V = 0; V < NV; ++V)
+			{
+				if (Cand[V]) { Push[V] = FMath::Min(Push[V] + Add[V], Limit[V]); }
+			}
+		}
+		int32 Moved = 0;
+		double MaxMove = 0.0;
+		for (int32 V = 0; V < NV; ++V)
+		{
+			if (Push[V] > 1e-4) { ++Moved; MaxMove = FMath::Max(MaxMove, Push[V]); }
+		}
+		int32 NCand = 0;
+		for (const bool B : Cand) { NCand += B ? 1 : 0; }
+		R->SetNumberField(TEXT("vertices"), NV);
+		R->SetNumberField(TEXT("candidates"), NCand);
+		R->SetNumberField(TEXT("outside_before"), PokingBefore);
+		R->SetNumberField(TEXT("worst_before_cm"), WorstBefore);
+		R->SetNumberField(TEXT("outside_after"), bDryRun ? PokingBefore : PokingAfter);
+		R->SetNumberField(TEXT("worst_after_cm"), bDryRun ? WorstBefore : WorstAfter);
+		R->SetNumberField(TEXT("vertices_moved"), Moved);
+		R->SetNumberField(TEXT("max_push_cm"), MaxMove);
+		R->SetArrayField(TEXT("passes"), PassReports);
+		LodReports.Add(MakeShared<FJsonValueObject>(R));
+		if (!bDryRun && Moved > 0)
+		{
+			FSkeletalMeshAttributes Attr(Desc);
+			TVertexAttributesRef<FVector3f> Positions = Attr.GetVertexPositions();
+			for (int32 V = 0; V < NV; ++V) { Positions.Set(Geom.VertexIds[V], FVector3f(Bind[V])); }
+			Edited.Add(Lod, MoveTemp(Desc));
+		}
+	}
+
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	Out->SetStringField(TEXT("source_body"), Source->GetPathName());
+	Out->SetArrayField(TEXT("garments"), VmhJson::StringArray(Garments.Names));
+	Out->SetArrayField(TEXT("poses"), PoseLabels(Poses));
+	Out->SetBoolField(TEXT("dry_run"), bDryRun);
+	Out->SetArrayField(TEXT("lods"), LodReports);
+	if (!bDryRun && Edited.Num() > 0)
+	{
+		USkeletalMesh* Fitted = DuplicateMesh(Source, OutBodyMeshPath, Error);
+		if (!Fitted || !CommitLods(Fitted, Edited, Error))
+		{
+			return VmhJson::Error(TEXT("COMMIT_FAILED"), Error, Out);
+		}
+		Out->SetStringField(TEXT("fitted_body"), Fitted->GetPathName());
+		if (bAssignToBlueprint)
+		{
+			AssignMesh(Blueprint, BodyComp.Template, Fitted);
+			Out->SetBoolField(TEXT("assigned"), true);
+		}
+	}
+	Out->SetStringField(TEXT("hint"), TEXT("outside_after should be 0 over every pose the game shows; then look at it through capture_fit_views (seated and standing, a low camera for skirts). Save the fitted body (and the Blueprint when assigned)"));
+	return VmhJson::Ok(Out);
+}
+
+FString UMetaHumanWardrobeService::MeasurePokeThrough(const FString& BlueprintPath, const FString& GarmentComponentsJson, const FString& OptionsJson)
+{
+	UBlueprint* Blueprint = VmhAssets::Load<UBlueprint>(BlueprintPath);
+	if (!Blueprint || !Blueprint->SimpleConstructionScript)
+	{
+		return VmhJson::Error(TEXT("BLUEPRINT_NOT_FOUND"), FString::Printf(TEXT("No Blueprint with a construction script at %s"), *BlueprintPath));
+	}
+	FString Error;
+	const TSharedPtr<FJsonObject> Options = VmhJson::Parse(OptionsJson, Error);
+	if (!Options.IsValid())
+	{
+		return VmhJson::Error(TEXT("BAD_OPTIONS"), Error);
+	}
+	FComp BodyComp;
+	if (!FindComp(Blueprint, OptStr(Options, TEXT("body_component"), TEXT("Body")), BodyComp, Error))
+	{
+		return VmhJson::Error(TEXT("COMPONENT_NOT_FOUND"), Error);
+	}
+	USkeletalMesh* Body = VmhAssets::Load<USkeletalMesh>(OptStr(Options, TEXT("body_mesh"), BodyComp.Mesh->GetPathName()));
+	if (!Body)
+	{
+		return VmhJson::Error(TEXT("MESH_NOT_FOUND"), TEXT("no body mesh"));
+	}
+	TArray<FPose> Poses;
+	if (!ReadPoses(Options, BodyComp.Mesh, Poses, Error, Blueprint, TEXT("runtime")))
+	{
+		return VmhJson::Error(TEXT("BAD_POSE"), Error);
+	}
+	FPosedGarments Garments;
+	if (!PoseGarments(Blueprint, BodyComp, GarmentComponentsJson, Poses, true, Garments, Error))
+	{
+		return VmhJson::Error(TEXT("BAD_ARGS"), Error);
+	}
+	const double Reach = OptNum(Options, TEXT("reach"), 6.0);
+	const double MaxDepth = OptNum(Options, TEXT("max_depth"), 2.0);
+	const double FacingMin = OptNum(Options, TEXT("facing"), 0.3);
+	TArray<TSharedPtr<FJsonValue>> LodReports;
+	TArray<int32> Lods;
+	for (const TSharedPtr<FJsonValue>& V : OptArr(Options, TEXT("lods"))) { Lods.AddUnique(static_cast<int32>(V->AsNumber())); }
+	if (Lods.Num() == 0) { Lods.Add(0); }
+	for (const int32 Lod : Lods)
+	{
+		TSharedPtr<FJsonObject> R = VmhJson::Obj();
+		R->SetNumberField(TEXT("lod"), Lod);
+		FMeshDescription Desc;
+		FLodGeom Geom;
+		if (!ReadLod(Body, Lod, Desc, Geom, Error))
+		{
+			R->SetStringField(TEXT("skipped"), Error);
+			LodReports.Add(MakeShared<FJsonValueObject>(R));
+			continue;
+		}
+		TArray<double> Limit;
+		const TArray<bool> Cand = PushCandidates(Geom, Body->GetRefSkeleton(), Options, Limit, Error);
+		TArray<TSharedPtr<FJsonValue>> PerGarment;
+		for (int32 G = 0; G < Garments.Names.Num(); ++G)
+		{
+			TArray<FSoup> Soups;
+			for (int32 P = 0; P < Poses.Num(); ++P) { Soups.Add(MoveTemp(Garments.Each[P][G])); }
+			const FPokeResult M = MeasurePoke(Geom, Body, Geom.BindPos, Poses, Soups, Garments.Segments, Cand, FTransform::Identity, Reach, MaxDepth, FacingMin);
+			for (int32 P = 0; P < Poses.Num(); ++P) { Garments.Each[P][G] = MoveTemp(Soups[P]); }
+			TSharedPtr<FJsonObject> GR = VmhJson::Obj();
+			GR->SetStringField(TEXT("garment"), Garments.Names[G]);
+			double Worst = 0.0;
+			int32 WorstVertex = INDEX_NONE, Outside = 0;
+			for (int32 V = 0; V < M.Depth.Num(); ++V)
+			{
+				if (M.Depth[V] > 0.0) { ++Outside; }
+				if (M.Depth[V] > Worst) { Worst = M.Depth[V]; WorstVertex = V; }
+			}
+			GR->SetNumberField(TEXT("vertices_outside"), Outside);
+			GR->SetNumberField(TEXT("worst_cm"), Worst);
+			TMap<FString, int32> Where;
+			for (int32 V = 0; V < M.Depth.Num(); ++V)
+			{
+				if (M.Depth[V] <= 0.0) { continue; }
+				int32 Dominant = INDEX_NONE; float Best = 0.f;
+				for (const TPair<int32, float>& W : Geom.Weights[V]) { if (W.Value > Best) { Best = W.Value; Dominant = W.Key; } }
+				if (Dominant != INDEX_NONE) { Where.FindOrAdd(Body->GetRefSkeleton().GetBoneName(Dominant).ToString())++; }
+			}
+			GR->SetArrayField(TEXT("outside_by_bone"), TopCounts(Where, 8));
+			if (WorstVertex != INDEX_NONE)
+			{
+				GR->SetStringField(TEXT("worst_at_bind_cm"), Geom.BindPos[WorstVertex].ToString());
+				GR->SetStringField(TEXT("worst_pose"), Poses[M.WorstPose[WorstVertex]].Label);
+			}
+			TArray<TSharedPtr<FJsonValue>> PerPose;
+			for (int32 P = 0; P < Poses.Num(); ++P)
+			{
+				TSharedPtr<FJsonObject> PP = VmhJson::Obj();
+				PP->SetStringField(TEXT("pose"), Poses[P].Label);
+				PP->SetNumberField(TEXT("vertices_outside"), M.PoseCount[P]);
+				PP->SetNumberField(TEXT("worst_cm"), FMath::Max(0.0, M.PoseMax[P]));
+				PerPose.Add(MakeShared<FJsonValueObject>(PP));
+			}
+			GR->SetArrayField(TEXT("poses"), PerPose);
+			PerGarment.Add(MakeShared<FJsonValueObject>(GR));
+		}
+		R->SetArrayField(TEXT("garments"), PerGarment);
+		LodReports.Add(MakeShared<FJsonValueObject>(R));
+	}
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	Out->SetStringField(TEXT("body"), Body->GetPathName());
+	Out->SetArrayField(TEXT("poses"), PoseLabels(Poses));
+	Out->SetArrayField(TEXT("lods"), LodReports);
+	Out->SetStringField(TEXT("hint"), TEXT("worst_cm > 0: skin comes out through that garment in that pose; push_body_under_garments fixes it on a body copy (or hide_body_under_garments for a closed garment)"));
+	return VmhJson::Ok(Out);
+}
+
+// =====================================================================================================================
+// capture_fit_views / dump_runtime_poses / dump_actor_pose
+// =====================================================================================================================
+
+namespace
+{
+	struct FView { FString Name; double Yaw = 90.0; double Pitch = 0.0; };
+
+	bool ParseViews(const FString& ViewsJson, TArray<FView>& Out, FString& OutError)
+	{
+		TArray<TSharedPtr<FJsonValue>> List;
+		const FString Json = ViewsJson.IsEmpty() ? TEXT("[\"front\",\"three_quarter\",\"side\",\"back\"]") : ViewsJson;
+		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), List))
+		{
+			OutError = TEXT("views: [\"front\",\"three_quarter\",\"side\",\"back\",\"left\",\"right\",\"low_front\"] or {\"name\":..,\"yaw\":deg,\"pitch\":deg}");
+			return false;
+		}
+		// MetaHumans face +Y: yaw 90 looks at the face, 270 at the back; pitch < 0 puts the camera below
+		auto Named = [](const FString& Name, FView& View) -> bool
+		{
+			View.Name = Name;
+			if (Name == TEXT("front")) { View.Yaw = 90.0; }
+			else if (Name == TEXT("back")) { View.Yaw = 270.0; }
+			else if (Name == TEXT("side") || Name == TEXT("left")) { View.Yaw = 0.0; }
+			else if (Name == TEXT("right")) { View.Yaw = 180.0; }
+			else if (Name == TEXT("three_quarter") || Name == TEXT("q34")) { View.Yaw = 45.0; }
+			else if (Name == TEXT("low_front")) { View.Yaw = 90.0; View.Pitch = -25.0; }
+			else if (Name == TEXT("high_front")) { View.Yaw = 90.0; View.Pitch = 25.0; }
+			else { return false; }
+			return true;
+		};
+		for (const TSharedPtr<FJsonValue>& V : List)
+		{
+			FView View;
+			if (V->Type == EJson::Object)
+			{
+				const TSharedPtr<FJsonObject> O = V->AsObject();
+				View.Name = OptStr(O, TEXT("name"), FString::Printf(TEXT("view%d"), Out.Num()));
+				View.Yaw = OptNum(O, TEXT("yaw"), 90.0);
+				View.Pitch = OptNum(O, TEXT("pitch"), 0.0);
+			}
+			else if (!Named(V->AsString().ToLower(), View))
+			{
+				OutError = FString::Printf(TEXT("unknown view %s"), *V->AsString());
+				return false;
+			}
+			Out.Add(View);
+		}
+		return Out.Num() > 0;
+	}
+
+	TArray<FName> FocusBones(const FString& Focus)
+	{
+		if (Focus == TEXT("head")) { return { TEXT("head"), TEXT("neck_02"), TEXT("FACIAL_C_FacialRoot") }; }
+		if (Focus == TEXT("chest")) { return { TEXT("spine_03"), TEXT("spine_05"), TEXT("neck_01"), TEXT("clavicle_l"), TEXT("clavicle_r"), TEXT("upperarm_l"), TEXT("upperarm_r") }; }
+		if (Focus == TEXT("legs")) { return { TEXT("pelvis"), TEXT("thigh_l"), TEXT("thigh_r"), TEXT("calf_l"), TEXT("calf_r"), TEXT("foot_l"), TEXT("foot_r") }; }
+		if (Focus == TEXT("hands")) { return { TEXT("hand_l"), TEXT("hand_r"), TEXT("lowerarm_l"), TEXT("lowerarm_r") }; }
+		return {};
+	}
+}
+
+FString UMetaHumanWardrobeService::CaptureFitViews(const FString& BlueprintPath, const FString& AnimPath, float Time, const FString& ViewsJson, const FString& OutDir, const FString& OptionsJson)
+{
+	UBlueprint* Blueprint = VmhAssets::Load<UBlueprint>(BlueprintPath);
+	if (!Blueprint)
+	{
+		return VmhJson::Error(TEXT("BLUEPRINT_NOT_FOUND"), FString::Printf(TEXT("No Blueprint at %s"), *BlueprintPath));
+	}
+	FString Error;
+	const TSharedPtr<FJsonObject> Options = VmhJson::Parse(OptionsJson, Error);
+	if (!Options.IsValid())
+	{
+		return VmhJson::Error(TEXT("BAD_OPTIONS"), Error);
+	}
+	TArray<FView> Views;
+	if (!ParseViews(ViewsJson, Views, Error))
+	{
+		return VmhJson::Error(TEXT("BAD_VIEWS"), Error);
+	}
+	UAnimSequence* Anim = nullptr;
+	if (!AnimPath.IsEmpty())
+	{
+		Anim = VmhAssets::Load<UAnimSequence>(AnimPath);
+		if (!Anim)
+		{
+			return VmhJson::Error(TEXT("ANIM_NOT_FOUND"), FString::Printf(TEXT("No AnimSequence at %s"), *AnimPath));
+		}
+	}
+	TArray<double> Times;
+	for (const TSharedPtr<FJsonValue>& T : OptArr(Options, TEXT("times"))) { Times.Add(T->AsNumber()); }
+	if (Times.Num() == 0) { Times.Add(Time); }
+
+	VmhPreview::FCharacter Character;
+	Character.BodyComponentName = OptStr(Options, TEXT("body_component"), TEXT("Body"));
+	if (!Character.Spawn(Blueprint, Error))
+	{
+		return VmhJson::Error(TEXT("SPAWN_FAILED"), Error);
+	}
+	TArray<FString> Hidden;
+	for (const TSharedPtr<FJsonValue>& H : OptArr(Options, TEXT("hide_components"))) { Hidden.Add(H->AsString()); }
+	if (Hidden.Num() > 0)
+	{
+		TArray<UPrimitiveComponent*> Prims;
+		Character.Actor()->GetComponents(Prims);
+		for (UPrimitiveComponent* P : Prims) { if (Hidden.Contains(P->GetName())) { P->SetVisibility(false); } }
+	}
+	const int32 Lod = static_cast<int32>(OptNum(Options, TEXT("lod"), 0));
+	const int32 Width = FMath::Clamp(static_cast<int32>(OptNum(Options, TEXT("width"), 768)), 64, 4096);
+	const int32 Height = FMath::Clamp(static_cast<int32>(OptNum(Options, TEXT("height"), 1024)), 64, 4096);
+	const float FOV = static_cast<float>(OptNum(Options, TEXT("fov"), 30.0));
+	const float Exposure = static_cast<float>(OptNum(Options, TEXT("exposure_bias"), 1.5));
+	const FString Focus = OptStr(Options, TEXT("focus"), TEXT("body")).ToLower();
+	const FString Dir = OutDir.IsEmpty() ? FPaths::ProjectSavedDir() / TEXT("VibeMetaHumans") / TEXT("FitViews") : OutDir;
+	FString Package, BpName;
+	VmhAssets::SplitAssetPath(Blueprint->GetPathName(), Package, BpName);
+
+	TArray<TSharedPtr<FJsonValue>> Files;
+	for (const double T : Times)
+	{
+		if (!Character.Pose(Anim, T, Error))
+		{
+			return VmhJson::Error(TEXT("POSE_FAILED"), Error);
+		}
+		Character.ForceLod(Lod);
+		FBox Box = Focus == TEXT("body") ? Character.Bounds() : Character.BoneBox(FocusBones(Focus), Focus == TEXT("head") ? 14.0 : 18.0);
+		if (!Box.IsValid)
+		{
+			Box = Character.Bounds();
+		}
+		const FVector Center = Box.GetCenter();
+		const double Radius = FMath::Max(10.0, Box.GetExtent().Size());
+		const double HalfFovV = FMath::Atan(FMath::Tan(FMath::DegreesToRadians(FOV * 0.5)) * Height / Width);
+		const double Distance = Radius / FMath::Sin(FMath::Min(HalfFovV, FMath::DegreesToRadians(FOV * 0.5))) * 0.92;
+		for (const FView& View : Views)
+		{
+			const FVector Direction = FRotator(View.Pitch, View.Yaw, 0.0).Vector();
+			const FVector Eye = Center + Direction * Distance;
+			TArray<FColor> Pixels;
+			if (!Character.Capture(Eye, Center, FOV, Width, Height, Exposure, Pixels, Error))
+			{
+				return VmhJson::Error(TEXT("CAPTURE_FAILED"), Error);
+			}
+			const FString Label = Anim ? FString::Printf(TEXT("%s_%05.2f"), *Anim->GetName(), T) : TEXT("rest");
+			const FString File = Dir / FString::Printf(TEXT("%s_%s_LOD%d_%s.png"), *BpName, *Label, Lod, *View.Name);
+			if (!VmhPreview::SavePng(File, Width, Height, Pixels, Error))
+			{
+				return VmhJson::Error(TEXT("WRITE_FAILED"), Error);
+			}
+			int64 Lit = 0;
+			for (const FColor& C : Pixels) { Lit += (C.R + C.G + C.B) > 60 ? 1 : 0; }
+			TSharedPtr<FJsonObject> F = VmhJson::Obj();
+			F->SetStringField(TEXT("file"), File);
+			F->SetStringField(TEXT("view"), View.Name);
+			F->SetNumberField(TEXT("time"), T);
+			F->SetNumberField(TEXT("non_dark_fraction"), static_cast<double>(Lit) / Pixels.Num());
+			Files.Add(MakeShared<FJsonValueObject>(F));
+		}
+	}
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	Out->SetStringField(TEXT("blueprint"), Blueprint->GetPathName());
+	Out->SetStringField(TEXT("anim"), Anim ? Anim->GetPathName() : TEXT(""));
+	Out->SetNumberField(TEXT("lod"), Lod);
+	Out->SetStringField(TEXT("focus"), Focus);
+	Out->SetArrayField(TEXT("files"), Files);
+	Out->SetStringField(TEXT("hint"), TEXT("the Blueprint is posed in a private preview world with every anim graph evaluated (post-process correctives included), as in PIE; grooms may not draw in a scene capture: judge hair in PIE. Look at every file"));
+	return VmhJson::Ok(Out);
+}
+
+FString UMetaHumanWardrobeService::DumpRuntimePoses(const FString& BlueprintPath, const FString& PosesJson, const FString& OutFilePath)
+{
+	UBlueprint* Blueprint = VmhAssets::Load<UBlueprint>(BlueprintPath);
+	if (!Blueprint || !Blueprint->SimpleConstructionScript)
+	{
+		return VmhJson::Error(TEXT("BLUEPRINT_NOT_FOUND"), FString::Printf(TEXT("No Blueprint with a construction script at %s"), *BlueprintPath));
+	}
+	FString Error;
+	FComp BodyComp;
+	if (!FindComp(Blueprint, TEXT("Body"), BodyComp, Error))
+	{
+		return VmhJson::Error(TEXT("COMPONENT_NOT_FOUND"), Error);
+	}
+	TSharedPtr<FJsonObject> Options = VmhJson::Obj();
+	TArray<TSharedPtr<FJsonValue>> List;
+	if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(PosesJson), List))
+	{
+		return VmhJson::Error(TEXT("BAD_ARGS"), TEXT("PosesJson: [{\"anim\": path, \"time\": s} | {\"anim\", \"times\": [...]} | {\"anim\", \"stride\": s}]"));
+	}
+	Options->SetArrayField(TEXT("poses"), List);
+	TArray<FPose> Runtime, Asset;
+	Options->SetStringField(TEXT("evaluate"), TEXT("runtime"));
+	if (!ReadPoses(Options, BodyComp.Mesh, Runtime, Error, Blueprint))
+	{
+		return VmhJson::Error(TEXT("BAD_POSE"), Error);
+	}
+	Options->SetStringField(TEXT("evaluate"), TEXT("asset"));
+	ReadPoses(Options, BodyComp.Mesh, Asset, Error, Blueprint);
+	TArray<TSharedPtr<FJsonValue>> Poses, Diffs;
+	for (int32 P = 1; P < Runtime.Num(); ++P) // [0] is the rest pose
+	{
+		Poses.Add(MakeShared<FJsonValueObject>(VmhPreview::PoseToJson(Runtime[P])));
+		if (Asset.IsValidIndex(P))
+		{
+			double Max = 0.0;
+			FName Worst;
+			for (const TPair<FName, FTransform>& B : Runtime[P].BoneCS)
+			{
+				if (const FTransform* A = Asset[P].BoneCS.Find(B.Key))
+				{
+					const double D = FVector::Dist(A->GetLocation(), B.Value.GetLocation());
+					if (D > Max) { Max = D; Worst = B.Key; }
+				}
+			}
+			TSharedPtr<FJsonObject> D = VmhJson::Obj();
+			D->SetStringField(TEXT("pose"), Runtime[P].Label);
+			D->SetNumberField(TEXT("runtime_vs_asset_max_cm"), Max);
+			D->SetStringField(TEXT("bone"), Worst.ToString());
+			Diffs.Add(MakeShared<FJsonValueObject>(D));
+		}
+	}
+	TSharedPtr<FJsonObject> File = VmhJson::Obj();
+	File->SetStringField(TEXT("blueprint"), Blueprint->GetPathName());
+	File->SetStringField(TEXT("body_mesh"), BodyComp.Mesh->GetPathName());
+	File->SetStringField(TEXT("space"), TEXT("Body component space, cm"));
+	File->SetArrayField(TEXT("poses"), Poses);
+	const FString Path = OutFilePath.IsEmpty() ? FPaths::ProjectSavedDir() / TEXT("VibeMetaHumans") / TEXT("Poses") / (Blueprint->GetName() + TEXT("_poses.json")) : OutFilePath;
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+	if (!FFileHelper::SaveStringToFile(VmhJson::Stringify(File), *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		return VmhJson::Error(TEXT("WRITE_FAILED"), FString::Printf(TEXT("could not write %s"), *Path));
+	}
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	Out->SetStringField(TEXT("file"), Path);
+	Out->SetNumberField(TEXT("poses"), Poses.Num());
+	Out->SetArrayField(TEXT("runtime_vs_asset"), Diffs);
+	Out->SetStringField(TEXT("hint"), TEXT("pass {\"poses\": [{\"file\": <file>}]} to push_body_under_garments, measure_poke_through, hide_body_under_garments or push_garment_out_of_mesh"));
+	return VmhJson::Ok(Out);
+}
+
+FString UMetaHumanWardrobeService::DumpActorPose(const FString& ActorLabel, const FString& ComponentName, const FString& OutFilePath, const FString& Label, bool bAppend)
+{
+	// PIE first: the pose the game really shows
+	UWorld* World = (GEditor && GEditor->PlayWorld) ? GEditor->PlayWorld.Get() : VmhAssets::EditorWorld();
+	AActor* Actor = nullptr;
+	for (TActorIterator<AActor> It(World); It && !Actor; ++It)
+	{
+		if (It->GetActorLabel() == ActorLabel || It->GetName() == ActorLabel) { Actor = *It; }
+	}
+	if (!Actor)
+	{
+		return VmhJson::Error(TEXT("ACTOR_NOT_FOUND"), FString::Printf(TEXT("no actor %s in %s"), *ActorLabel, World ? *World->GetName() : TEXT("(no world)")));
+	}
+	USkeletalMeshComponent* Comp = nullptr;
+	TArray<USkeletalMeshComponent*> Comps;
+	Actor->GetComponents(Comps);
+	for (USkeletalMeshComponent* C : Comps) { if (C->GetName() == (ComponentName.IsEmpty() ? TEXT("Body") : ComponentName)) { Comp = C; } }
+	if (!Comp || !Comp->GetSkeletalMeshAsset())
+	{
+		return VmhJson::Error(TEXT("COMPONENT_NOT_FOUND"), FString::Printf(TEXT("%s has no skeletal mesh component %s"), *ActorLabel, *ComponentName));
+	}
+	FPose Pose;
+	Pose.Label = Label.IsEmpty() ? FString::Printf(TEXT("%s %.2fs"), *ActorLabel, World->GetTimeSeconds()) : Label;
+	const FReferenceSkeleton& Ref = Comp->GetSkeletalMeshAsset()->GetRefSkeleton();
+	const TArray<FTransform>& CS = Comp->GetComponentSpaceTransforms();
+	for (int32 B = 0; B < Ref.GetNum() && B < CS.Num(); ++B) { Pose.BoneCS.Add(Ref.GetBoneName(B), CS[B]); }
+	const FString Path = OutFilePath.IsEmpty() ? FPaths::ProjectSavedDir() / TEXT("VibeMetaHumans") / TEXT("Poses") / (ActorLabel + TEXT("_pie.json")) : OutFilePath;
+	TSharedPtr<FJsonObject> File;
+	FString Existing, ParseError;
+	if (bAppend && FFileHelper::LoadFileToString(Existing, *Path))
+	{
+		File = VmhJson::Parse(Existing, ParseError);
+	}
+	if (!File.IsValid())
+	{
+		File = VmhJson::Obj();
+		File->SetStringField(TEXT("space"), TEXT("Body component space, cm"));
+		File->SetStringField(TEXT("body_mesh"), Comp->GetSkeletalMeshAsset()->GetPathName());
+	}
+	TArray<TSharedPtr<FJsonValue>> Poses = OptArr(File, TEXT("poses"));
+	Poses.Add(MakeShared<FJsonValueObject>(VmhPreview::PoseToJson(Pose)));
+	File->SetArrayField(TEXT("poses"), Poses);
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+	if (!FFileHelper::SaveStringToFile(VmhJson::Stringify(File), *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		return VmhJson::Error(TEXT("WRITE_FAILED"), FString::Printf(TEXT("could not write %s"), *Path));
+	}
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	Out->SetStringField(TEXT("file"), Path);
+	Out->SetStringField(TEXT("world"), World->GetName());
+	Out->SetBoolField(TEXT("pie"), GEditor && GEditor->PlayWorld != nullptr);
+	Out->SetNumberField(TEXT("poses_in_file"), Poses.Num());
+	return VmhJson::Ok(Out);
+}
+
+// =====================================================================================================================
+// GeometryScript-backed helpers (Content/Python/vmh_wardrobe.py): add_skinned_accessory, make_garment_variant,
+// transfer_skin_weights
+// =====================================================================================================================
+
+namespace
+{
+	/** Run vmh_wardrobe.<Function>(**Kwargs) in the editor's Python and return its JSON (files in, files out: no quoting). */
+	FString RunWardrobePython(const FString& Function, const TSharedPtr<FJsonObject>& Kwargs)
+	{
+		IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
+		if (!Python || !Python->IsPythonAvailable())
+		{
+			return VmhJson::Error(TEXT("PYTHON_UNAVAILABLE"), TEXT("the Python Editor Script Plugin is not available"));
+		}
+		const FString Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("VibeMetaHumans") / TEXT("Py"));
+		IFileManager::Get().MakeDirectory(*Dir, true);
+		const FString Id = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+		const FString In = Dir / (Id + TEXT("_in.json"));
+		const FString Out = Dir / (Id + TEXT("_out.json"));
+		FFileHelper::SaveStringToFile(VmhJson::Stringify(Kwargs), *In, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		FPythonCommandEx Command;
+		Command.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+		Command.FileExecutionScope = EPythonFileExecutionScope::Private;
+		Command.Command = FString::Printf(TEXT("import vmh_wardrobe\nwith open(r'%s', encoding='utf-8') as _i:\n    _r = vmh_wardrobe.run_json('%s', _i.read())\nwith open(r'%s', 'w', encoding='utf-8') as _o:\n    _o.write(_r)\n"), *In, *Function, *Out);
+		const bool bRan = Python->ExecPythonCommandEx(Command);
+		FString Result;
+		const bool bRead = FFileHelper::LoadFileToString(Result, *Out);
+		IFileManager::Get().Delete(*In);
+		IFileManager::Get().Delete(*Out);
+		if (!bRan || !bRead)
+		{
+			return VmhJson::Error(TEXT("PYTHON_FAILED"), FString::Printf(TEXT("vmh_wardrobe.%s did not run: %s"), *Function, *Command.CommandResult.Left(1500)));
+		}
+		return Result;
+	}
+}
+
+FString UMetaHumanWardrobeService::AddSkinnedAccessory(const FString& BlueprintPath, const FString& StaticMeshPath, const FString& ComponentName, const FString& Mode, const FString& SurfaceComponentsJson, const FString& Bone, const FString& RelativeJson, const FString& OutMeshPath)
+{
+	FString Error;
+	TArray<TSharedPtr<FJsonValue>> Surfaces;
+	if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(SurfaceComponentsJson.IsEmpty() ? TEXT("[\"Body\"]") : SurfaceComponentsJson), Surfaces))
+	{
+		return VmhJson::Error(TEXT("BAD_ARGS"), TEXT("SurfaceComponentsJson is a JSON array of component names"));
+	}
+	const TSharedPtr<FJsonObject> Relative = VmhJson::Parse(RelativeJson, Error);
+	if (!Relative.IsValid())
+	{
+		return VmhJson::Error(TEXT("BAD_ARGS"), Error);
+	}
+	TSharedPtr<FJsonObject> K = VmhJson::Obj();
+	K->SetStringField(TEXT("blueprint"), BlueprintPath);
+	K->SetStringField(TEXT("static_mesh"), StaticMeshPath);
+	K->SetStringField(TEXT("component"), ComponentName);
+	K->SetStringField(TEXT("mode"), Mode.IsEmpty() ? TEXT("surface") : Mode.ToLower());
+	K->SetArrayField(TEXT("surface_components"), Surfaces);
+	K->SetStringField(TEXT("bone"), Bone.IsEmpty() ? TEXT("spine_05") : Bone);
+	K->SetObjectField(TEXT("relative"), Relative);
+	K->SetStringField(TEXT("out_path"), OutMeshPath);
+	return RunWardrobePython(TEXT("add_skinned_accessory"), K);
+}
+
+FString UMetaHumanWardrobeService::MakeGarmentVariant(const FString& SourceMeshPath, const FString& DestFolder, const FString& Name, const FString& TextureVariant, int32 MaxTextureSize)
+{
+	TSharedPtr<FJsonObject> K = VmhJson::Obj();
+	K->SetStringField(TEXT("source_mesh"), SourceMeshPath);
+	K->SetStringField(TEXT("dst_folder"), DestFolder);
+	K->SetStringField(TEXT("name"), Name);
+	K->SetStringField(TEXT("texture_variant"), TextureVariant);
+	K->SetNumberField(TEXT("max_texture_size"), MaxTextureSize);
+	return RunWardrobePython(TEXT("make_garment_variant"), K);
+}
+
+FString UMetaHumanWardrobeService::TransferSkinWeights(const FString& TargetMeshPath, const FString& SourceMeshPath, const FString& OutMeshPath, const FString& Method)
+{
+	TSharedPtr<FJsonObject> K = VmhJson::Obj();
+	K->SetStringField(TEXT("target_mesh"), TargetMeshPath);
+	K->SetStringField(TEXT("source_mesh"), SourceMeshPath);
+	K->SetStringField(TEXT("out_path"), OutMeshPath);
+	K->SetStringField(TEXT("method"), Method.IsEmpty() ? TEXT("closest") : Method.ToLower());
+	return RunWardrobePython(TEXT("transfer_skin_weights"), K);
 }
