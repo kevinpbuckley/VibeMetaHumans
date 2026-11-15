@@ -51,9 +51,10 @@ s = json.loads(unreal.MetaHumanSetupService.get_status())
 |---|---|---|
 | Environment, what exists, enum names, open an asset editor | `/Skills/VibeMetaHumans/metahuman-setup` | `MetaHumanSetupService` |
 | Make or change a character (body, skin, eyes, makeup, teeth, lashes, hair, Creator outfits), rig it, build the Blueprint, place it | `/Skills/VibeMetaHumans/metahuman-creator` | `MetaHumanCharacterService` |
-| Dress a BUILT Blueprint in marketplace/Fab garments; poke-through, cuff spikes, necklines, keep it through a rebuild, groom LODs | `/Skills/VibeMetaHumans/metahuman-wardrobe` | `MetaHumanWardrobeService` (+ `attach_skeletal_mesh_to_blueprint`) |
-| Facial animation from a video file (webcam/DSLR), an iPhone take, or audio; export AnimSequence/LevelSequence | `/Skills/VibeMetaHumans/metahuman-animator` | `MetaHumanAnimatorService` (+ `MetaHumanIdentityService` for iPhone depth takes) |
+| Dress a BUILT Blueprint in marketplace/Fab garments; poke-through, see-through dresses, cuff spikes and LOD streaks, necklines, accessories, fit checks in game poses, keep it through a rebuild, placed actors, groom LODs | `/Skills/VibeMetaHumans/metahuman-wardrobe` | `MetaHumanWardrobeService` (+ `attach_skeletal_mesh_to_blueprint`) |
+| Facial animation from a video file (webcam/DSLR), an iPhone take, or audio; export AnimSequence/LevelSequence; a face AnimBP that plays clips; blinks | `/Skills/VibeMetaHumans/metahuman-animator` | `MetaHumanAnimatorService` (+ `MetaHumanIdentityService` for iPhone depth takes) |
 | Real-time face capture in the editor, calibrate, bind to a placed MetaHuman, Take Recorder | `/Skills/VibeMetaHumans/metahuman-live-link` | `MetaHumanLiveLinkService` |
+| A MetaHuman going into a packaged game: face clips and blinks at run time, cook size, web/mobile look, LODs, shipping safety, pre-ship checks | `/Skills/VibeMetaHumans/metahuman-shipping` | (rules; tools in the wardrobe and animator packs) |
 | Anything not wrapped: read/patch properties, call a Blueprint library, describe a struct | (this pack, below) | `MetaHumanObjectService` |
 
 ## Rules of thumb

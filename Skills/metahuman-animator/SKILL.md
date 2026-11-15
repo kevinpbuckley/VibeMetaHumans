@@ -1,7 +1,7 @@
 ---
 name: metahuman-animator
 display_name: MetaHuman Animator (offline facial animation)
-description: Turn footage or audio into MetaHuman facial animation with unreal.MetaHumanAnimatorService and unreal.MetaHumanIdentityService - ingest a webcam/DSLR video, an iPhone Live Link Face take or a take archive into Footage Capture Data (Epic CaptureManagerToolset), build and auto-rig an Identity from a neutral frame (Mesh to MetaHuman), create MonoFootage / DepthFootage / Audio Performances, process (Epic ProcessPerformance) and export an AnimSequence (Epic) or LevelSequence onto a MetaHuman. Use for "animate the face from this video/phone take/voice line".
+description: Turn footage or audio into MetaHuman facial animation, and play it in a game (a face AnimBP with a slot, blinks added to baked clips), with unreal.MetaHumanAnimatorService and unreal.MetaHumanIdentityService - ingest a webcam/DSLR video, an iPhone Live Link Face take or a take archive into Footage Capture Data (Epic CaptureManagerToolset), build and auto-rig an Identity from a neutral frame (Mesh to MetaHuman), create MonoFootage / DepthFootage / Audio Performances, process (Epic ProcessPerformance) and export an AnimSequence (Epic) or LevelSequence onto a MetaHuman. Use for "animate the face from this video/phone take/voice line".
 vibeue_classes:
   - MetaHumanAnimatorService
   - MetaHumanIdentityService
@@ -21,6 +21,9 @@ keywords:
   - audio driven animation
   - lip sync
   - export anim sequence
+  - face anim blueprint
+  - blinks
+  - head snap
 ---
 
 # MetaHuman Animator (offline facial animation)
@@ -101,7 +104,7 @@ await call_tool("EditorToolset.ObjectToolset.SetProperties", instance=p,
 await call_tool(PERF + ".ProcessPerformance", performance=p, params={})
 await call_tool("EditorToolset.AssetToolset.SaveAsset", assetPath=p)
 await call_tool(EXP + ".ExportPerformanceAnimationSequence", performance=p,
-    options={"assetPath": "/Game/MHA/Anims", "assetName": "AS_vo01", "targetSkeletonOrSkeletalMesh": "/Game/MetaHumans/Common/Face/Face_Archetype_Skeleton.Face_Archetype_Skeleton", "bEnableHeadMovement": True, "exportRange": "ProcessingRange"})
+    options={"assetPath": "/Game/MHA/Anims", "assetName": "AS_vo01", "targetSkeletonOrSkeletalMesh": "/MetaHumanCharacter/Face/Face_Archetype_Skeleton.Face_Archetype_Skeleton", "bEnableHeadMovement": True, "exportRange": "ProcessingRange"})
 # for a NEW audio performance, PERF + ".GenerateAnimationFromAudio" takes mood, moodIntensity, outputControls and a head-movement option directly
 ```
 
@@ -113,15 +116,40 @@ for hand animation. Import the wav first (any importer) so a SoundWave asset exi
 - `EXP.ExportPerformanceAnimationSequence(performance, options={assetPath, assetName, targetSkeletonOrSkeletalMesh, bEnableHeadMovement, exportRange})`
   (`exportRange`: `ProcessingRange` | `WholeSequence`). Epic validates the target skeleton, saves the result and
   refuses to overwrite an existing asset; with an empty target it binds `Face_Archetype_Skeleton` for a face-only
-  export. Epic object parameters need full `Package.Object` paths (a bare package path is rejected). Pass `/Game/MetaHumans/Common/Face/Face_Archetype_Skeleton.Face_Archetype_Skeleton` explicitly (exists once a MetaHuman has
-  been built) to play on any MetaHuman face. Play it on the built
-  Blueprint's Face component (Sequencer animation track, or the Face AnimBP slot).
+  export. Epic object parameters need full `Package.Object` paths (a bare package path is rejected). Pass
+  `/MetaHumanCharacter/Face/Face_Archetype_Skeleton.Face_Archetype_Skeleton` (it ships with the MetaHumanCharacter
+  plugin; `/Game/MetaHumans/Common/Face/Face_Archetype_Skeleton` did NOT exist in a 5.9 project with six built
+  characters) to play on any MetaHuman face. Play it on the built Blueprint's Face component (Sequencer animation
+  track, or a slot of a face AnimBP that has one: see "Face clips in a game").
 - `export_level_sequence(p, pkg, name, target_metahuman_bp, identity, camera, audio, video)`: with a
   built MetaHuman Blueprint path the sequence drives that character with the Face control rig track,
   head movement, and audio. Open it with `EditorToolset.EditorAppToolset.OpenEditorForAsset(assetPath)`.
 - `get_status(p)` anytime: inputs, `can_process`, `processed_frames`, `diagnostics_warning`.
 - `configure_performance(p, json)` for anything else (`SolveType`, `bSkipDiagnostics`,
   `StartFrameToProcess`/`EndFrameToProcess`, `FocalLength`, `UserExcludedFrames`).
+
+## Face clips in a game (baked lip sync)
+
+```python
+# a face AnimBP that can play clips: copy pose from the body + DefaultSlot below FACIAL_C_FacialRoot + HeadControlSwitch x 0
+r = json.loads(anim.create_face_anim_blueprint("/Game/Anim", "ABP_Face_Slot", "", "", "DefaultSlot"))   # 4th arg: optional looping blink clip
+# set it on every built Blueprint (and again after every rebuild)
+unreal.MetaHumanWardrobeService.post_build_fixup("/Game/MetaHumans/Vale/BP_Vale", json.dumps({"face_anim_class": r["anim_blueprint"]}), False)
+# blinks: audio-driven bakes barely blink (curves peaked at 0.05); a blink every 2.8-4.2 s where the clip has none
+print(json.loads(anim.add_blinks("/Game/Anims/Face", 2.8, 4.2, True, '{"name_prefix": "FA_"}')))   # dry run: planned times
+anim.add_blinks("/Game/Anims/Face", 2.8, 4.2, False, '{"name_prefix": "FA_", "save": true}')
+```
+
+- Play a line with `PlaySlotAnimationAsDynamicMontage(clip, "DefaultSlot", ...)` on the Face component's anim instance and
+  start the voice with it. Log an error when there is no anim instance; never fall back to `PlayAnimation` (single-node
+  mode destroys the AnimBP instance for the line and a seated character's head drops off the neck).
+- `add_blinks` is deterministic per asset name (a re-run adds nothing) and keeps the clip's own blinks (>= 0.6). Curve
+  names come back lowercased from bakes; the tool matches case-insensitively.
+- For blinks in the silence between lines pass a looping blink-only clip as `BlinkLoopAnimPath`: it is blended over the
+  face by max curve value. One shared loop blinks every character in phase.
+- Bake offline, do not solve at run time: the realtime solver models are 318 MB of cook (see
+  `/Skills/VibeMetaHumans/metahuman-shipping`). Verify each bake: clip length within 0.1 s of the audio, and
+  `CTRL_expressions_jawOpen` peaking above 0.3.
 
 ## Gotchas
 
@@ -135,12 +163,15 @@ for hand animation. Import the wav first (any importer) so a SoundWave asset exi
   `Sadness`, etc. The service accepts enum names case-insensitively.
 - **Face clips played as montages do not show on the plugin's face AnimBP.** `/MetaHumanCharacter/Face/ABP_Face`
   is CopyPoseFromMesh only, with no Slot node, so a face AnimSequence played on a slot (`PlaySlotAnimationAsDynamicMontage`,
-  a sequencer slot track) is ignored. Use your own face AnimBP in the project: copy pose from the body, then a layered
-  blend with a `DefaultSlot`, and set it as the Face component's anim class on the built Blueprint (2026-11-12).
+  a sequencer slot track) is silently ignored: voice plays, face still. `create_face_anim_blueprint` makes one that
+  works; a plain Slot after the copy is wrong too (an exported clip is a root plus ~260 curves: it snapped head and
+  neck to the reference pose), so the slot is blended in below `FACIAL_C_FacialRoot` with curves overriding.
 - **Exported head movement snaps the head.** In `ABP_Face_PostProcess`, `HeadControlSwitch` is an on/off gate for
   the head-movement IK (0.35 = off, no blend); when on, it snaps the head to the archetype pose (about 4.4 cm forward
-  and down on one character). Scaling HeadYaw/Pitch/Translation does not remove that offset: multiply
-  `HeadControlSwitch` by 0 in your face AnimBP, or export without head movement.
+  and down on one character). Scaling HeadYaw/Pitch/Translation does not remove that offset: the AnimBP from
+  `create_face_anim_blueprint` multiplies `HeadControlSwitch` by 0 (what shipped). Exporting without head movement is
+  the other route (not tried in the jam).
+- **A rebuild resets the Face anim class** to the plugin's ABP_Face: `post_build_fixup` with `face_anim_class`.
 - An AnimGraph node's `show_pin_for_properties` cannot be applied from Python (no ReconstructNode; set_editor_property
   does not fire the PostEditChange). Use node property maps such as ModifyCurve's `curve_map`.
 - **Never duplicate an engine-plugin AnimBP into /Game as a test fixture** (e.g. `ABP_MH_LiveLink`, `ABP_Face`).

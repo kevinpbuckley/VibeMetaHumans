@@ -71,7 +71,16 @@ grooms under `/Game/MetaHumans/<Name>`.
    Likeness from a single reference PICTURE (no 3D scan, 2026-10-07): `get_face_landmarks(c)` reads the
    Creator's own sculpt landmarks (`{"landmarks":{"0":[x,y,z],...}, "likely_ears":[...], "likely_neck":[...],
    "likely_skull":[...]}`, centimetres, edit frame) - match them to a MediaPipe measurement of a front capture
-   of the preview actor (a face-fit script does this), then
+   with the face-fit kit the plugin ships (`Content/Python/vmh_facefit`, used on five characters in a jam):
+   `capture_face_for_fit(c, out_dir, "iter0")` renders the Creator's editing actor front-on in a private preview
+   world (no level, no PIE) and writes `mh_iter0.png` plus `mh_iter0.json` (every landmark projected to pixels, the
+   ear/neck/skull ones listed in `skip`; `tracked_contours_px` is MetaHuman's own contour tracker on the render);
+   outside the editor `measure.py crop|measure` (MediaPipe: needs opencv-python, numpy, mediapipe) measures the
+   reference photo and the render, and `fit.py` writes the landmark deltas; `vmh_facefit.ue_capture.apply_deltas`
+   feeds them to `move_face_landmarks`; repeat two or three rounds while `mean_err_ipd` falls. Gotchas: a capture made
+   in the same call as `spawn_in_level` comes out empty (the kit never uses a level actor); base-colour captures come
+   back with alpha 0 (the tool forces 255); a preset's skin settings (`FaceTextureIndex`, tone) are readable with
+   `get_settings(preset, "skin")` without opening an edit session. Then
    `move_face_landmarks(c, '{"23":[0.3,0,-0.1],"41":[-0.2,0,0.15]}')` moves just those indices (deltas; pass
    `bAbsolute=true` for absolute positions) and holds every OTHER landmark in place by default
    (`HoldJson="auto"`; `"none"` lets everything else drift, a JSON array of indices holds exactly those),
