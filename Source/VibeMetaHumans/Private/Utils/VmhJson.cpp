@@ -70,8 +70,10 @@ namespace VmhJson
 		Out->SetBoolField(TEXT("success"), true);
 		if (Data.IsValid())
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Data->Values)
+			for (const auto& PairRaw : Data->Values)
 			{
+				// UE 5.8: FJsonObject keys are TSharedString, not FString
+				const TPair<FString, TSharedPtr<FJsonValue>> Pair(FString(*PairRaw.Key), PairRaw.Value);
 				Out->SetField(Pair.Key, Pair.Value);
 			}
 		}
@@ -86,8 +88,10 @@ namespace VmhJson
 		Out->SetStringField(TEXT("error"), Message);
 		if (Extra.IsValid())
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Extra->Values)
+			for (const auto& PairRaw : Extra->Values)
 			{
+				// UE 5.8: FJsonObject keys are TSharedString, not FString
+				const TPair<FString, TSharedPtr<FJsonValue>> Pair(FString(*PairRaw.Key), PairRaw.Value);
 				Out->SetField(Pair.Key, Pair.Value);
 			}
 		}
@@ -207,8 +211,10 @@ namespace VmhJson
 			return true;
 		}
 		bool bModified = false;
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Patch->Values)
+		for (const auto& PairRaw : Patch->Values)
 		{
+			// UE 5.8: FJsonObject keys are TSharedString, not FString
+			const TPair<FString, TSharedPtr<FJsonValue>> Pair(FString(*PairRaw.Key), PairRaw.Value);
 			FProperty* Prop = FindPropertyLoose(Object->GetClass(), Pair.Key);
 			if (!Prop)
 			{
@@ -385,8 +391,10 @@ namespace VmhJson
 		bool bOk = true;
 		if (Args.IsValid() && Args->Values.Num() > 0)
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Args->Values)
+			for (const auto& PairRaw : Args->Values)
 			{
+				// UE 5.8: FJsonObject keys are TSharedString, not FString
+				const TPair<FString, TSharedPtr<FJsonValue>> Pair(FString(*PairRaw.Key), PairRaw.Value);
 				FProperty* Prop = nullptr;
 				if (Pair.Key.IsNumeric())
 				{
