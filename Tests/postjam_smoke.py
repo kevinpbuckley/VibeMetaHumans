@@ -115,6 +115,12 @@ def t_snapshot():
     # a "rebuild" puts the mesh back; the restore must clear it again
     nodes[victim].set_editor_property("skeletal_mesh_asset", other)
     unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+    # ... unless that property is skipped (a value changed on purpose after the snapshot), and a dry run changes nothing
+    s = J(wd.restore_blueprint_components(path, json.dumps(snap), json.dumps([victim + ".SkinnedAsset"]), True, True, False))
+    d = J(wd.restore_blueprint_components(path, json.dumps(snap), "[]", True, True, True))
+    kept = scs(unreal.load_asset(path))[victim].get_editor_property("skeletal_mesh_asset")
+    check("snapshot.skip_and_dry_run", s["success"] and not s["applied"] and kept == other and [a["property"] for a in d["applied"]] == [victim + ".SkinnedAsset"],
+          skipped=s.get("skipped"), applied=s.get("applied"), dry=[a["property"] for a in d.get("applied", [])])
     r = J(wd.restore_blueprint_components(path, json.dumps(snap), "[]", True, True, False))
     after = scs(unreal.load_asset(path))[victim].get_editor_property("skeletal_mesh_asset")
     check("snapshot.restore_clears", r["success"] and after is None, applied=r.get("applied"), failed=r.get("failed"))
@@ -122,7 +128,9 @@ def t_snapshot():
 
 # ------------------------------------------------------------------ #4 post-build fix-up (dry run on the real BP)
 def t_fixup():
-    r = J(wd.post_build_fixup(BP, json.dumps({"brow_opacity": 2.0}), True))
+    r = J(wd.post_build_fixup(BP, json.dumps({"brow_opacity": 2.0, "texture_caps": {"T_Body_*_VT": 1024, "T_Head_*_VT": 2048}}), True))
+    plain = J(wd.post_build_fixup(BP, "{}", True))
+    check("fixup.caps_opt_in", plain["success"] and plain.get("textures") == [], textures=len(plain.get("textures", [])))
     check("fixup.dry_run", r["success"] and "grooms" in r and "textures" in r,
           grooms=[(g["component"], len(g.get("changes", [])), len(g.get("gaps", []))) for g in r.get("grooms", [])],
           brows=r.get("brow_materials"), textures=len(r.get("textures", [])), face=r.get("face_anim_class_before"))

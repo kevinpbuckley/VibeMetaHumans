@@ -266,7 +266,11 @@ public:
 	 * are dropped and edited properties (Body mesh, Face anim class, override materials, tags) reset. With
 	 * bPreserveBlueprintCustomization every Blueprint already in the output folder is snapshotted first and restored
 	 * after (MetaHumanWardrobeService.restore_blueprint_components): missing components re-created, recorded values
-	 * re-applied; the report is in "preserved". Asset-level edits (groom LODs, material tweaks on built assets, an
+	 * re-applied; the report is in "preserved". The restore puts the Blueprint back as it WAS: a component's mesh,
+	 * groom, anim class, override materials and visibility are restored even when empty (so a cleared default outfit
+	 * stays cleared), which also means a hair or outfit newly chosen in the Creator for a slot that was empty before
+	 * is cleared again - read "applied" (before/after per property) and set those back, or build without preserving
+	 * and use restore_blueprint_components with skip patterns. Asset-level edits (groom LODs, material tweaks on built assets, an
 	 * edited built body) are NOT covered: they are overwritten by the build.
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Character")

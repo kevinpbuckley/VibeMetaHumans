@@ -80,7 +80,7 @@ lives in the other packs: `metahuman-creator` (build), `metahuman-wardrobe` (clo
 ## 3. LODs and hair
 
 - **Count the LODs you have.** An Optimized Medium build gave 3 skeletal LODs for body and face and 4 for outfits, not
-  8. `r.SkeletalMesh.LODBias=2` would put every face on its last LOD in close-ups; all skeletal meshes of six characters
+  8. `r.SkeletalMeshLODBias=2` would put every face on its last LOD in close-ups; all skeletal meshes of six characters
   were 7.8 MB cooked, so no LOD bias was applied. `describe_skeletal_mesh` lists the LODs and the bones each drops.
 - **Grooms with cards at only some LODs go bald at the others.** An Optimized build: strands at LOD 0-1, cards only at
   LOD 3, helmets at LOD 5 and 7, brows hidden at LOD 5-7. With strands off, LOD 4 and 6 drew no hair and brows vanished
@@ -111,7 +111,8 @@ lives in the other packs: `metahuman-creator` (build), `metahuman-wardrobe` (clo
   for any solver or tracker model left.
 - **Virtual textures need per-asset caps.** The body uses 8K virtual textures (`T_Body_BC_VT`, `_N_VT`, `_Scatter_VT`,
   `_SRMF_VT`); a device-profile texture-group cap does **not** reach them. Cap the body's at 1024 (it sits under clothes)
-  and the face's `T_Head_*_VT` at 2048 with the per-asset max texture size: `post_build_fixup` does it after each build.
+  and the face's `T_Head_*_VT` at 2048 with the per-asset max texture size, after each build:
+  `post_build_fixup(bp, '{"texture_caps": {"T_Body_*_VT": 1024, "T_Head_*_VT": 2048}}')` (caps are opt-in and only lower).
   One 2K character added about 168 MB of cooked container and overflowed a 192 MB texture pool by 21 MB; six character
   folders went 255.1 to 175.6 MB.
 - **Never flip `virtual_texture_streaming` from Python**: the materials then fail with "Sampler type is Virtual Color,

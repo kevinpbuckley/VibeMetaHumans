@@ -322,8 +322,18 @@ namespace
 		// leader LODs count here too (a 4-LOD shoe with generated LOD1-3 is drawn at every body LOD from LOD0's weights)
 		for (int32 G = GarmentLod + 1; G <= GarmentLast; ++G)
 		{
-			const FSkeletalMeshLODInfo* Info = Garment->GetLODInfo(G);
-			if (Info && !Garment->HasMeshDescription(G) && Info->ReductionSettings.BaseLOD == GarmentLod)
+			// follow the chain: a LOD reduced from a LOD that was itself reduced still carries the first one's weights
+			int32 Base = G;
+			for (int32 Guard = 0; Guard <= GarmentLast && Base > GarmentLod && !Garment->HasMeshDescription(Base); ++Guard)
+			{
+				const FSkeletalMeshLODInfo* Info = Garment->GetLODInfo(Base);
+				if (!Info || Info->ReductionSettings.BaseLOD >= Base)
+				{
+					break;
+				}
+				Base = Info->ReductionSettings.BaseLOD;
+			}
+			if (Base == GarmentLod && Base != G)
 			{
 				int32 F = 0, L = 0;
 				Range(G, F, L);
@@ -583,6 +593,7 @@ TSharedPtr<FJsonObject> UMetaHumanWardrobeService::CheckFollower(const USkeletal
 		MissingVerts += bMissing ? 1 : 0;
 	}
 	Out->SetNumberField(TEXT("garment_lod"), GarmentLod);
+	Out->SetNumberField(TEXT("leader_lod"), LeaderFirst); // kept for readers of the earlier single-LOD report
 	Out->SetStringField(TEXT("leader_lods"), LodRange(LeaderFirst, LeaderLast));
 	Out->SetNumberField(TEXT("unevaluated_bone_vertices"), DeadVerts);
 	Out->SetArrayField(TEXT("unevaluated_bones"), TopCounts(DeadUse, 12));
@@ -791,6 +802,7 @@ FString UMetaHumanWardrobeService::FixUnevaluatedBoneWeights(const FString& Garm
 		}
 		int32 DeadBones = 0;
 		for (const bool B : Dead) { DeadBones += B ? 1 : 0; }
+		R->SetNumberField(TEXT("leader_lod"), LeaderFirst); // kept for readers of the earlier single-LOD report
 		R->SetStringField(TEXT("leader_lods"), LodRange(LeaderFirst, LeaderLast));
 		R->SetNumberField(TEXT("unevaluated_bones_in_skeleton"), DeadBones);
 		R->SetNumberField(TEXT("vertices"), Geom.Weights.Num());
@@ -2086,19 +2098,15 @@ FString UMetaHumanWardrobeService::PostBuildFixup(const FString& BlueprintPath, 
 		Out->SetArrayField(TEXT("brow_materials"), Brows);
 	}
 
-	// 3. texture caps, per asset (a device-profile group cap does not reach virtual textures). Never flips
-	//    VirtualTextureStreaming: that broke the materials ("Sampler type is Virtual Color, should be Color").
+	// 3. texture caps, per asset (a device-profile group cap does not reach virtual textures), only when asked for:
+	//    options.texture_caps {"name wildcard": size}. Never flips VirtualTextureStreaming: that broke the materials
+	//    ("Sampler type is Virtual Color, should be Color").
 	{
 		TArray<TPair<FString, int32>> Caps;
 		const TSharedPtr<FJsonObject>* CapsObj = nullptr;
 		if (Options->TryGetObjectField(TEXT("texture_caps"), CapsObj))
 		{
 			for (const TPair<FString, TSharedPtr<FJsonValue>>& C : (*CapsObj)->Values) { Caps.Emplace(C.Key, static_cast<int32>(C.Value->AsNumber())); }
-		}
-		else
-		{
-			Caps.Emplace(TEXT("T_Body_*_VT"), 1024);
-			Caps.Emplace(TEXT("T_Head_*_VT"), 2048);
 		}
 		TArray<TSharedPtr<FJsonValue>> Textures;
 		if (Caps.Num() > 0)
@@ -2122,7 +2130,10 @@ FString UMetaHumanWardrobeService::PostBuildFixup(const FString& BlueprintPath, 
 				R->SetNumberField(TEXT("max_texture_size_before"), Texture->MaxTextureSize);
 				R->SetNumberField(TEXT("cap"), Cap->Value);
 				R->SetBoolField(TEXT("virtual_texture"), Texture->VirtualTextureStreaming != 0);
-				if (Texture->MaxTextureSize != Cap->Value && !bDryRun)
+				// a cap only ever lowers: 0 is uncapped, and a smaller cap already set is kept
+				const bool bLower = Cap->Value > 0 && (Texture->MaxTextureSize == 0 || Texture->MaxTextureSize > Cap->Value);
+				R->SetBoolField(TEXT("would_change"), bLower);
+				if (bLower && !bDryRun)
 				{
 					Texture->Modify();
 					Texture->MaxTextureSize = Cap->Value;
@@ -2191,9 +2202,26 @@ FString UMetaHumanWardrobeService::AuditPlacedInstances(const FString& Blueprint
 	{
 		return VmhJson::Error(TEXT("BLUEPRINT_NOT_FOUND"), FString::Printf(TEXT("No compiled Blueprint at %s"), *BlueprintPath));
 	}
-	if (!MapPath.IsEmpty() && !UEditorLoadingAndSavingUtils::LoadMap(MapPath))
+	if (!MapPath.IsEmpty())
 	{
-		return VmhJson::Error(TEXT("MAP_NOT_LOADED"), FString::Printf(TEXT("could not load %s (save or discard unsaved level changes first)"), *MapPath));
+		FString MapPackage, MapName;
+		VmhAssets::SplitAssetPath(MapPath, MapPackage, MapName);
+		const UWorld* Open = VmhAssets::EditorWorld();
+		if (!Open || Open->GetOutermost()->GetName() != MapPackage / MapName)
+		{
+			// loading a map replaces the open one without asking: never throw away unsaved level changes
+			TArray<UPackage*> DirtyMaps;
+			UEditorLoadingAndSavingUtils::GetDirtyMapPackages(DirtyMaps);
+			if (DirtyMaps.Num() > 0)
+			{
+				return VmhJson::Error(TEXT("UNSAVED_LEVEL"), FString::Printf(TEXT("the open level has unsaved changes (%s%s): save or discard them, then call again (loading %s would drop them)"),
+					*DirtyMaps[0]->GetName(), DirtyMaps.Num() > 1 ? TEXT(", ...") : TEXT(""), *MapPath));
+			}
+			if (!UEditorLoadingAndSavingUtils::LoadMap(MapPath))
+			{
+				return VmhJson::Error(TEXT("MAP_NOT_LOADED"), FString::Printf(TEXT("could not load %s"), *MapPath));
+			}
+		}
 	}
 	UWorld* World = VmhAssets::EditorWorld();
 	if (!World)

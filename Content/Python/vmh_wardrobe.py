@@ -155,6 +155,10 @@ def add_skinned_accessory(blueprint, static_mesh, component, mode="surface", sur
     nodes = _scs(bp)
     if "Body" not in nodes:
         raise RuntimeError("the Blueprint has no Body component")
+    if component in nodes:
+        raise RuntimeError(f"{blueprint} already has a component {component}: remove it first (remove_component_from_blueprint)")
+    if mode not in ("surface", "rigid"):
+        raise RuntimeError('mode is "surface" or "rigid"')
     body_sk = nodes["Body"].get_editor_property("skeletal_mesh_asset")
     bdm = _read_sk(body_sk)
     bone_t = dict(_bones(bdm)).get(bone)
@@ -204,8 +208,6 @@ def add_skinned_accessory(blueprint, static_mesh, component, mode="surface", sur
     sk = _new_skeletal(dm, body_sk.skeleton, path, slots, mats)
     fix = json.loads(unreal.MetaHumanWardrobeService.fix_unevaluated_bone_weights(sk.get_path_name(), body_sk.get_path_name(), False))
     EAL.save_asset(sk.get_path_name(), only_if_is_dirty=False)
-    if component in nodes:
-        raise RuntimeError(f"{blueprint} already has a component {component}: remove it first (remove_component_from_blueprint)")
     att = json.loads(unreal.MetaHumanCharacterService.attach_skeletal_mesh_to_blueprint(blueprint, component, sk.get_path_name(), "Body", True, ""))
     return {"success": bool(att.get("success")), "mesh": sk.get_path_name(), "mode": mode, "rigid_bone": rigid_bone,
             "top_bones": _top_bones(sk), "lod_fix": fix.get("vertices_fixed"), "attach": att,

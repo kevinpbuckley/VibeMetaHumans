@@ -134,6 +134,12 @@ namespace VmhBlueprintSnapshot
 					Name = Name.Left(Bracket);
 				}
 				const FString Label = Component.IsEmpty() ? Entry.Key : Component + TEXT(".") + Entry.Key;
+				// SkeletalMesh is the deprecated alias of SkinnedAsset and is recorded beside it: one entry restores
+				// both, so a skip pattern on SkinnedAsset is not undone by the alias
+				if (Name == TEXT("SkeletalMesh") && Object->IsA<USkinnedMeshComponent>() && Recorded->HasField(TEXT("SkinnedAsset")))
+				{
+					continue;
+				}
 				if (Skipped(Options, Component, Entry.Key))
 				{
 					SkippedOut.Add(MakeShared<FJsonValueString>(Label));

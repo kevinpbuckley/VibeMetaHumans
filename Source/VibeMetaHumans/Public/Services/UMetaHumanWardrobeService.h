@@ -191,7 +191,7 @@ public:
 	 * "three_quarter", "side", "back", "right", "low_front", "high_front", or {"name","yaw","pitch"} (MetaHumans face
 	 * +Y: yaw 90 is the front; pitch < 0 puts the camera below - use it for skirts). OutDir default
 	 * Saved/VibeMetaHumans/FitViews. OptionsJson: {"times":[s...] (several poses of the clip), "focus":"body"|"head"|
-	 * "chest"|"legs"|"hands", "lod":0, "width":768, "height":1024, "fov":30, "exposure_bias":0, "hide_components":[],
+	 * "chest"|"legs"|"hands", "lod":0, "width":768, "height":1024, "fov":30, "exposure_bias":1.5, "hide_components":[],
 	 * "body_component":"Body"}. Returns the files (and the fraction of non-dark pixels, to catch an empty frame). Needs
 	 * a rendering editor (not -nullrhi). Grooms may not draw in a scene capture: judge hair in PIE.
 	 */
@@ -257,11 +257,11 @@ public:
 	 * Redo the asset-level fixes a Creator rebuild throws away, on one built Blueprint (after build(..., preserve)):
 	 * (1) fill_groom_lods on every groom component's groom (hidden LODs made visible: brows), (2) the brow groom's
 	 * OpacityNear/OpacityFar (reported always; set when options.brow_opacity > 0 - pale brows were fixed with 2.0),
-	 * (3) per-asset max_texture_size caps on the build's textures by name wildcard (default {"T_Body_*_VT":1024,
-	 * "T_Head_*_VT":2048}; a device-profile cap does not reach virtual textures; virtual_texture_streaming is never
-	 * touched), (4) the Face component's anim class back to options.face_anim_class (a rebuild restores the plugin's
+	 * (3) per-asset max_texture_size caps on the build's textures by name wildcard, only when options.texture_caps is
+	 * given (the jam's web build used {"T_Body_*_VT":1024,"T_Head_*_VT":2048}; a cap only lowers, never raises; a
+	 * device-profile cap does not reach virtual textures; virtual_texture_streaming is never touched), (4) the Face component's anim class back to options.face_anim_class (a rebuild restores the plugin's
 	 * copy-pose-only ABP_Face). OptionsJson defaults: {"groom_lods":true,"show_hidden_groom_lods":true,"brow_opacity":0,
-	 * "brow_component":"Eyebrows","texture_caps":{...},"face_anim_class":"","face_component":"Face","folder":<BP folder>}.
+	 * "brow_component":"Eyebrows","texture_caps":{},"face_anim_class":"","face_component":"Face","folder":<BP folder>}.
 	 * Only /Game assets outside /Game/Fab are edited. Body fits (hide/push) are NOT redone: re-run them on the new body.
 	 * bDryRun reports what it would change. Saves nothing; returns the dirty packages.
 	 */
@@ -274,7 +274,8 @@ public:
 	 * holes in every real shot while every fresh spawn was clean; a stale Face anim class override hid the face fix.
 	 * Reports per actor every differing editable component property (instance value, Blueprint value) and components
 	 * added on the instance only; the root's placement is ignored. bClearOverrides copies the Blueprint's values back
-	 * (then save the level / its external actor packages).
+	 * for EVERY listed override (read the list first: an override may be meant), then save the level / its external
+	 * actor packages. MapPath is refused (UNSAVED_LEVEL) while the open level has unsaved changes.
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
 	static FString AuditPlacedInstances(const FString& BlueprintPath, bool bClearOverrides = false, const FString& MapPath = TEXT(""));

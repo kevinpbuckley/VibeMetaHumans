@@ -182,10 +182,13 @@ print(json.loads(wd.audit_placed_instances(BP, False, "/Game/Maps/L_Main")))   #
   mesh (`SkinnedAsset`, `StaticMesh`, `GroomAsset`, `BindingAsset`), `AnimClass`, `OverrideMaterials`, `bVisible` and
   `bHiddenInGame`: a cleared default-outfit mesh equals the class default, and before this was recorded the rebuild's
   default tee came back. The restore re-creates missing components, re-applies differing values and never deletes.
-  Read its `applied` list: a stale recorded value (old brows, old override materials) comes back too.
+  Read its `applied` list: a stale recorded value (old brows, old override materials) comes back too, and a slot that
+  was empty before the build is emptied again (hair or an outfit newly chosen in the Creator): set those back, or
+  restore by hand with skip patterns (`'["Hair.GroomAsset"]'`).
 - `post_build_fixup` redoes what a rebuild throws away at asset level: groom LOD fill on every groom (brows made
   visible), the brow groom's `OpacityNear/Far` (pale brows were fixed with 2.0), per-asset texture caps
-  (`T_Body_*_VT` 1024, `T_Head_*_VT` 2048 by default; never flips virtual texture streaming), the Face anim class.
+  when you pass them (`"texture_caps": {"T_Body_*_VT": 1024, "T_Head_*_VT": 2048}` for a web or low-end target; a cap
+  only lowers; never flips virtual texture streaming), the Face anim class.
   It does **not** redo body fits: run `push/hide_body_under_garments` again on the new body.
 - **Check the placed actors, not a fresh spawn.** A level instance kept an old per-instance `Body` mesh override: holes
   in the chest and shoulders in every real shot while every fresh-spawn check passed; another kept a stale Face anim
