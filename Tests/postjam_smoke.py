@@ -126,6 +126,28 @@ def t_snapshot():
     check("snapshot.restore_clears", r["success"] and after is None, applied=r.get("applied"), failed=r.get("failed"))
 
 
+def t_snapshot_zero():
+    # values recorded as "nothing" (hidden, a cleared groom) must come back too: a real rebuild re-showed a hidden groom
+    path = dup_bp("BP_SnapZero")
+    bp = unreal.load_asset(path)
+    nodes = scs(bp)
+    grooms = [n for n, o in nodes.items() if isinstance(o, unreal.GroomComponent) and o.get_editor_property("groom_asset")]
+    hide, clear = grooms[0], grooms[-1]
+    asset = nodes[clear].get_editor_property("groom_asset")
+    nodes[hide].set_editor_property("visible", False)
+    nodes[clear].set_editor_property("groom_asset", None)
+    unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+    snap = J(wd.snapshot_blueprint_components(path, ""))["snapshot"]
+    nodes[hide].set_editor_property("visible", True)
+    nodes[clear].set_editor_property("groom_asset", asset)
+    unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+    r = J(wd.restore_blueprint_components(path, json.dumps(snap), "[]", True, True, False))
+    after = scs(unreal.load_asset(path))
+    check("snapshot.restores_hidden_and_cleared", r["success"] and not r["failed"] and after[hide].get_editor_property("visible") is False
+          and after[clear].get_editor_property("groom_asset") is None, hidden=hide, cleared=clear,
+          applied=[a["property"] for a in r.get("applied", [])], failed=r.get("failed"))
+
+
 # ------------------------------------------------------------------ #4 post-build fix-up (dry run on the real BP)
 def t_fixup():
     r = J(wd.post_build_fixup(BP, json.dumps({"brow_opacity": 2.0, "texture_caps": {"T_Body_*_VT": 1024, "T_Head_*_VT": 2048}}), True))
@@ -314,6 +336,7 @@ run("blinks", t_blinks)
 run("faceabp", t_faceabp)
 run("describe", t_describe)
 run("snapshot", t_snapshot)
+run("snapshot", t_snapshot_zero)
 run("fixup", t_fixup)
 run("audit", t_audit)
 run("push", t_push)

@@ -195,10 +195,22 @@ namespace VmhBlueprintSnapshot
 				{
 					Object->Modify();
 					Object->PreEditChange(Prop);
-					const TCHAR* Result = Prop->ImportText_InContainer(*Wanted, Object, Object, PPF_None);
+					bool bResult = false;
+					if (Wanted.IsEmpty())
+					{
+						// an empty text is how a zero value is recorded (false, 0, None, an empty array: the export leaves
+						// out what equals nothing) and it does not import: a component hidden with bVisible false came
+						// back visible, a cleared groom or anim class came back set (2026-11-14, found on a real rebuild)
+						Prop->ClearValue_InContainer(Object, Index);
+						bResult = CurrentText(Object, Prop, Index).IsEmpty();
+					}
+					else
+					{
+						bResult = Prop->ImportText_InContainer(*Wanted, Object, Object, PPF_None) != nullptr;
+					}
 					FPropertyChangedEvent Event(Prop, EPropertyChangeType::ValueSet);
 					Object->PostEditChangeProperty(Event);
-					if (!Result)
+					if (!bResult)
 					{
 						Failed.Add(MakeShared<FJsonValueString>(Label + TEXT(": the recorded text did not import")));
 						continue;
