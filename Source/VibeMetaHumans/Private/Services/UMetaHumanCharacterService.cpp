@@ -1035,8 +1035,10 @@ FString UMetaHumanCharacterService::SetBodyConstraints(const FString& CharacterP
 	TArray<FString> Applied;
 	TArray<FString> Unknown;
 	TSet<FString> Named; // the measurements this call names, plus Height: only these end up active
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Values->Values)
+	for (const auto& PairRaw : Values->Values)
 	{
+		// UE 5.8: FJsonObject keys are TSharedString, not FString
+		const TPair<FString, TSharedPtr<FJsonValue>> Pair(FString(*PairRaw.Key), PairRaw.Value);
 		FMetaHumanCharacterBodyConstraint* Found = Constraints.FindByPredicate([&Pair](const FMetaHumanCharacterBodyConstraint& C)
 		{
 			return C.Name.ToString().Equals(Pair.Key, ESearchCase::IgnoreCase);
@@ -1191,8 +1193,10 @@ FString UMetaHumanCharacterService::MoveFaceLandmarks(const FString& CharacterPa
 
 	TMap<int32, FVector> TargetAbs;
 	TArray<FString> BadIndex, EarRefused;
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Targets->Values)
+	for (const auto& PairRaw : Targets->Values)
 	{
+		// UE 5.8: FJsonObject keys are TSharedString, not FString
+		const TPair<FString, TSharedPtr<FJsonValue>> Pair(FString(*PairRaw.Key), PairRaw.Value);
 		const int32 Idx = FCString::Atoi(*Pair.Key);
 		const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
 		if (!L0.IsValidIndex(Idx))
@@ -1828,8 +1832,10 @@ FString UMetaHumanCharacterService::SetWardrobeItemParameters(const FString& Cha
 	{
 		const UPropertyBag* BagStruct = Bag.GetPropertyBagStruct();
 		void* BagMemory = Bag.GetMutableValue().GetMemory();
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Patch->Values)
+		for (const auto& PairRaw : Patch->Values)
 		{
+			// UE 5.8: FJsonObject keys are TSharedString, not FString
+			const TPair<FString, TSharedPtr<FJsonValue>> Pair(FString(*PairRaw.Key), PairRaw.Value);
 			FProperty* Prop = VmhJson::FindPropertyLoose(BagStruct, Pair.Key);
 			if (!Prop)
 			{
