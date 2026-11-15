@@ -12,9 +12,12 @@ class UBlueprint;
  * (2026-11-12). A rebuild of BP_<Name> drops every component added after the build (garments, props, a speaker) and
  * resets edited properties (Body mesh, Face anim class, override materials, tags).
  *
- * The snapshot keeps, per construction-script component: class, parent, attach socket, and every editable property
- * whose value differs from the component class default, as exported text. Restore re-creates missing components and
- * re-imports differing property values; it never deletes anything.
+ * The snapshot keeps, per construction-script component: class, parent, attach socket, every editable property whose
+ * value differs from the component class default, and - whatever their value, so an explicit clear survives - the
+ * pinned properties SkinnedAsset, StaticMesh, GroomAsset, BindingAsset, AnimClass, OverrideMaterials, bVisible and
+ * bHiddenInGame (2026-11-14: a cleared default-outfit mesh equalled the class default, was not recorded, and the
+ * rebuild's default tee came back). Restore re-creates missing components and re-imports differing property values
+ * (mesh assets through their setters); it never deletes anything.
  */
 namespace VmhBlueprintSnapshot
 {

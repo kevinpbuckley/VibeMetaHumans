@@ -3,8 +3,13 @@
 #include "Utils/VmhBlueprintSnapshot.h"
 
 #include "Components/ActorComponent.h"
+#include "Components/SkinnedMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
+#include "Engine/SkinnedAsset.h"
+#include "Engine/StaticMesh.h"
+#include "Misc/PackageName.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -35,11 +40,25 @@ namespace VmhBlueprintSnapshot
 		}
 
 		/**
-		 * Every recordable property of Object that differs from Archetype (all of them when Archetype is null).
+		 * Component properties recorded whatever their value, so an explicit clear is kept: a mesh set to None, emptied
+		 * override materials, a component shown or hidden. Values equal to the class default used to be skipped, so a
+		 * cleared default-outfit mesh was never recorded and a rebuild brought the default tee back (issue #4).
+		 */
+		bool IsPinned(const FProperty* Prop)
+		{
+			static const TSet<FName> Pinned = {
+				TEXT("SkinnedAsset"), TEXT("StaticMesh"), TEXT("GroomAsset"), TEXT("BindingAsset"), TEXT("AnimClass"),
+				TEXT("OverrideMaterials"), TEXT("bVisible"), TEXT("bHiddenInGame") };
+			return Pinned.Contains(Prop->GetFName());
+		}
+
+		/**
+		 * Every recordable property of Object that differs from Archetype (all of them when Archetype is null), plus the
+		 * pinned ones (bPinned) whatever their value.
 		 * bSkipComponentRefs (class defaults): the generated class's component variables are not values to restore -
 		 * the components are, and a rebuilt class may not have the variable yet.
 		 */
-		TSharedPtr<FJsonObject> ExportDiffering(UObject* Object, const UObject* Archetype, bool bSkipComponentRefs = false)
+		TSharedPtr<FJsonObject> ExportDiffering(UObject* Object, const UObject* Archetype, bool bSkipComponentRefs = false, bool bPinned = false)
 		{
 			TSharedPtr<FJsonObject> Props = VmhJson::Obj();
 			if (!Object)
@@ -61,9 +80,10 @@ namespace VmhBlueprintSnapshot
 						continue;
 					}
 				}
+				const bool bAlways = bPinned && IsPinned(Prop);
 				for (int32 Index = 0; Index < Prop->ArrayDim; ++Index)
 				{
-					if (Archetype && Archetype->IsA(Prop->GetOwnerClass()) && Prop->Identical_InContainer(Object, Archetype, Index, PPF_None))
+					if (!bAlways && Archetype && Archetype->IsA(Prop->GetOwnerClass()) && Prop->Identical_InContainer(Object, Archetype, Index, PPF_None))
 					{
 						continue;
 					}
@@ -135,6 +155,36 @@ namespace VmhBlueprintSnapshot
 				Change->SetStringField(TEXT("property"), Label);
 				Change->SetStringField(TEXT("before"), Before.Left(300));
 				Change->SetStringField(TEXT("after"), Wanted.Left(300));
+				// mesh assets go through their setters: SkinnedAsset has an editor alias (SkeletalMeshAsset) a raw import misses
+				USkinnedMeshComponent* Skinned = Cast<USkinnedMeshComponent>(Object);
+				UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Object);
+				const bool bSkinnedAsset = Skinned && Prop->GetFName() == TEXT("SkinnedAsset");
+				const bool bStaticMesh = Static && Prop->GetFName() == TEXT("StaticMesh");
+				if ((bSkinnedAsset || bStaticMesh) && !Options.bDryRun)
+				{
+					UObject* Asset = nullptr;
+					if (!Wanted.Equals(TEXT("None")) && !Wanted.IsEmpty())
+					{
+						Asset = StaticLoadObject(UObject::StaticClass(), nullptr, *FPackageName::ExportTextPathToObjectPath(Wanted));
+						if (!Asset)
+						{
+							Failed.Add(MakeShared<FJsonValueString>(Label + TEXT(": the recorded asset no longer exists: ") + Wanted));
+							continue;
+						}
+					}
+					Object->Modify();
+					if (bSkinnedAsset)
+					{
+						Skinned->SetSkinnedAssetAndUpdate(Cast<USkinnedAsset>(Asset), false);
+					}
+					else
+					{
+						Static->SetStaticMesh(Cast<UStaticMesh>(Asset));
+					}
+					Change->SetStringField(TEXT("now"), CurrentText(Object, Prop, Index).Left(300));
+					Applied.Add(MakeShared<FJsonValueObject>(Change));
+					continue;
+				}
 				if (!Options.bDryRun)
 				{
 					Object->Modify();
@@ -177,7 +227,7 @@ namespace VmhBlueprintSnapshot
 				const USCS_Node* Parent = SCS->FindParentNode(Node);
 				C->SetStringField(TEXT("parent"), Parent ? Parent->GetVariableName().ToString() : (Node->ParentComponentOrVariableName.IsNone() ? FString() : Node->ParentComponentOrVariableName.ToString()));
 				C->SetStringField(TEXT("socket"), Node->AttachToName.IsNone() ? TEXT("") : Node->AttachToName.ToString());
-				C->SetObjectField(TEXT("properties"), ExportDiffering(Node->ComponentTemplate, Node->ComponentTemplate->GetArchetype()));
+				C->SetObjectField(TEXT("properties"), ExportDiffering(Node->ComponentTemplate, Node->ComponentTemplate->GetArchetype(), false, true));
 				Components.Add(MakeShared<FJsonValueObject>(C));
 			}
 		}

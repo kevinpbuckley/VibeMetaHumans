@@ -40,12 +40,25 @@ class VIBEMETAHUMANS_API UMetaHumanWardrobeService : public UToolsetDefinition
 public:
 	/**
 	 * Move a garment's skin weights off the leader's unevaluated bones onto their nearest evaluated ancestor, on every
-	 * LOD (garment LOD n is checked against leader LOD min(n, last)): what the body does itself for the joints its LOD
-	 * settings remove. GarmentMeshPath is edited IN PLACE (use a copy of a marketplace mesh); LeaderMeshPath is the
-	 * Blueprint's Body mesh. bDryRun only counts. Reports per LOD the vertices fixed and the bones they used.
+	 * LOD: what the body does itself for the joints its LOD settings remove. Garment LOD n is checked against leader LOD
+	 * n, and the garment's LAST LOD against every remaining leader LOD (a one-LOD garment is drawn at body LOD 0, 1 and 2,
+	 * where the body drops corrective and helper bones). GarmentMeshPath is edited IN PLACE (use a copy of a marketplace
+	 * mesh); LeaderMeshPath is the Blueprint's Body mesh. bDryRun only counts. Reports per LOD the leader LODs checked,
+	 * the vertices fixed and the bones they used.
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
 	static FString FixUnevaluatedBoneWeights(const FString& GarmentMeshPath, const FString& LeaderMeshPath, bool bDryRun = false);
+
+	/**
+	 * Read-only facts about a skeletal mesh, per LOD: screen size, vertices, triangles, sections (material index,
+	 * triangles, disabled), required bones, the bones NOT evaluated at that LOD and those dropped since the previous LOD,
+	 * the LOD settings' bones_to_remove; plus skeleton, physics asset, post-process AnimBP, LOD settings asset, material
+	 * slots, sockets, morph target count and bounds. LeaderMeshPath (optional, the Body mesh): each LOD is also checked
+	 * as that leader's follower (vertices weighted to bones the leader does not evaluate or lacks). Bone name lists are
+	 * capped at 40 unless bListAllBones. Use it instead of guessing lod_info / get_lod_num / bones_to_remove in Python.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString DescribeSkeletalMesh(const FString& MeshPath, const FString& LeaderMeshPath = TEXT(""), bool bListAllBones = false);
 
 	/**
 	 * A copy of a built body (OutMeshPath, default <BodyMeshPath>_Full) whose LODs are replaced by the full-topology
@@ -120,8 +133,35 @@ public:
 	static FString FillGroomLods(const FString& GroomPath, bool bMakeHiddenLodsVisible = false, bool bDryRun = false);
 
 	/**
-	 * Not a tool: how a garment will behave as Leader's follower at GarmentLod - vertices weighted to bones Leader does
-	 * not evaluate, and garment bones Leader lacks. Used by attach_skeletal_mesh_to_blueprint.
+	 * Redo the asset-level fixes a Creator rebuild throws away, on one built Blueprint (after build(..., preserve)):
+	 * (1) fill_groom_lods on every groom component's groom (hidden LODs made visible: brows), (2) the brow groom's
+	 * OpacityNear/OpacityFar (reported always; set when options.brow_opacity > 0 - pale brows were fixed with 2.0),
+	 * (3) per-asset max_texture_size caps on the build's textures by name wildcard (default {"T_Body_*_VT":1024,
+	 * "T_Head_*_VT":2048}; a device-profile cap does not reach virtual textures; virtual_texture_streaming is never
+	 * touched), (4) the Face component's anim class back to options.face_anim_class (a rebuild restores the plugin's
+	 * copy-pose-only ABP_Face). OptionsJson defaults: {"groom_lods":true,"show_hidden_groom_lods":true,"brow_opacity":0,
+	 * "brow_component":"Eyebrows","texture_caps":{...},"face_anim_class":"","face_component":"Face","folder":<BP folder>}.
+	 * Only /Game assets outside /Game/Fab are edited. Body fits (hide/push) are NOT redone: re-run them on the new body.
+	 * bDryRun reports what it would change. Saves nothing; returns the dirty packages.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString PostBuildFixup(const FString& BlueprintPath, const FString& OptionsJson = TEXT("{}"), bool bDryRun = false);
+
+	/**
+	 * List the instances of a Blueprint placed in the open editor level (or MapPath, loaded first) whose components
+	 * carry per-instance overrides that differ from the Blueprint: an old Body mesh override on a placed actor kept the
+	 * holes in every real shot while every fresh spawn was clean; a stale Face anim class override hid the face fix.
+	 * Reports per actor every differing editable component property (instance value, Blueprint value) and components
+	 * added on the instance only; the root's placement is ignored. bClearOverrides copies the Blueprint's values back
+	 * (then save the level / its external actor packages).
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeMetaHumans|Wardrobe")
+	static FString AuditPlacedInstances(const FString& BlueprintPath, bool bClearOverrides = false, const FString& MapPath = TEXT(""));
+
+	/**
+	 * Not a tool: how a garment will behave as Leader's follower at GarmentLod (-1 = every LOD, totals plus a per-LOD
+	 * list) - vertices weighted to bones Leader does not evaluate at the leader LODs that garment LOD is drawn with, and
+	 * garment bones Leader lacks. Used by attach_skeletal_mesh_to_blueprint and describe_skeletal_mesh.
 	 */
 	static TSharedPtr<FJsonObject> CheckFollower(const USkeletalMesh* Garment, const USkeletalMesh* Leader, int32 GarmentLod = 0);
 };

@@ -2006,6 +2006,7 @@ FString UMetaHumanCharacterService::Build(const FString& CharacterPath, const FS
 			}
 		}
 		Out->SetArrayField(TEXT("preserved"), Preserved);
+		Out->SetStringField(TEXT("preserve_hint"), TEXT("the restore covers the Blueprint only: run MetaHumanWardrobeService.post_build_fixup on each Blueprint (groom LODs, brow opacity, texture caps, Face anim class), re-run the body fits on the new body, then audit_placed_instances on the level the game uses"));
 	}
 
 	// a build leaves dirty T_PreBakedGroom_* packages that were never written to disk; saving them fails (2026-11-12)
@@ -3262,7 +3263,8 @@ FString UMetaHumanCharacterService::AttachSkeletalMeshToBlueprint(const FString&
 	TArray<FString> Warnings;
 	if (LeaderMesh)
 	{
-		const TSharedPtr<FJsonObject> Check = UMetaHumanWardrobeService::CheckFollower(Mesh, LeaderMesh, 0);
+		// every garment LOD, the last one against every remaining leader LOD (a one-LOD garment streaked at body LOD1-2)
+		const TSharedPtr<FJsonObject> Check = UMetaHumanWardrobeService::CheckFollower(Mesh, LeaderMesh, -1);
 		Out->SetObjectField(TEXT("follower_check"), Check);
 		double Dead = 0, Missing = 0;
 		if (Check->TryGetNumberField(TEXT("unevaluated_bone_vertices"), Dead) && Dead > 0)

@@ -2,8 +2,21 @@
 
 #include "Services/UMetaHumanWardrobeService.h"
 
+#include "Animation/AnimInstance.h"
 #include "Animation/AnimSequence.h"
+#include "Animation/Skeleton.h"
 #include "BoneWeights.h"
+#include "Engine/SkeletalMeshLODSettings.h"
+#include "Engine/Texture.h"
+#include "EngineUtils.h"
+#include "FileHelpers.h"
+#include "GroomComponent.h"
+#include "MaterialEditingLibrary.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "PreviewScene.h"
+#include "Engine/SkeletalMeshSocket.h"
+#include "Engine/SkinnedAssetCommon.h"
+#include "PhysicsEngine/PhysicsAsset.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DNA.h"
 #include "Dom/JsonValue.h"
@@ -30,6 +43,7 @@
 #include "Utils/VmhAssets.h"
 #include "Utils/VmhBlueprintSnapshot.h"
 #include "Utils/VmhJson.h"
+#include "Utils/VmhPreview.h"
 #include "Utils/VmhSkin.h"
 
 using namespace VmhSkin;
@@ -133,27 +147,114 @@ namespace
 		return ToRoot(SCS, Comp.Node) * ToRoot(SCS, Leader.Node).Inverse();
 	}
 
-	/** Rest pose plus the listed animation poses, on the leader mesh. */
-	bool ReadPoses(const TSharedPtr<FJsonObject>& Options, const USkeletalMesh* Leader, TArray<FPose>& OutPoses, FString& OutError)
+	/**
+	 * Rest pose plus the listed poses, on the leader mesh. Entries of options.poses:
+	 *   "path" or {"anim": path, "time": s} | {"anim", "times": [s...]} | {"anim", "stride": s} (every s seconds),
+	 *     evaluated per entry "evaluate" (default options.evaluate, else DefaultEvaluate): "asset" samples the clip on the
+	 *     skeleton (no post-process AnimBP: body correctives at rest), "runtime" plays it on the Blueprint spawned in a
+	 *     preview world with every anim graph evaluated (what PIE shows);
+	 *   {"file": path} - poses written by dump_runtime_poses / dump_actor_pose (or by hand, same JSON);
+	 *   {"bones": {name: [tx,ty,tz, qx,qy,qz,qw, sx,sy,sz]}, "label": ...} - one pose inline (body component space).
+	 */
+	bool ReadPoses(const TSharedPtr<FJsonObject>& Options, const USkeletalMesh* Leader, TArray<FPose>& OutPoses, FString& OutError, UBlueprint* Blueprint = nullptr, const TCHAR* DefaultEvaluate = TEXT("asset"))
 	{
 		OutPoses.Add(RefPose(Leader->GetRefSkeleton()));
+		const FString GlobalEvaluate = OptStr(Options, TEXT("evaluate"), DefaultEvaluate);
+		TUniquePtr<VmhPreview::FCharacter> Runtime;
+		auto AddPoseList = [&OutPoses, &OutError](const TArray<TSharedPtr<FJsonValue>>& List) -> bool
+		{
+			for (const TSharedPtr<FJsonValue>& Item : List)
+			{
+				FPose Pose;
+				if (!VmhPreview::PoseFromJson(Item->AsObject(), Pose, OutError))
+				{
+					return false;
+				}
+				if (Pose.Label.IsEmpty()) { Pose.Label = FString::Printf(TEXT("dump %d"), OutPoses.Num()); }
+				OutPoses.Add(MoveTemp(Pose));
+			}
+			return true;
+		};
 		for (const TSharedPtr<FJsonValue>& V : OptArr(Options, TEXT("poses")))
 		{
-			const TSharedPtr<FJsonObject> P = V->AsObject();
+			const TSharedPtr<FJsonObject> P = V->Type == EJson::Object ? V->AsObject() : nullptr;
+			FString File;
+			if (P.IsValid() && P->TryGetStringField(TEXT("file"), File))
+			{
+				FString Text;
+				TSharedPtr<FJsonValue> Parsed;
+				if (!FFileHelper::LoadFileToString(Text, *File) || !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Parsed) || !Parsed.IsValid())
+				{
+					OutError = FString::Printf(TEXT("could not read the pose file %s"), *File);
+					return false;
+				}
+				const TSharedPtr<FJsonObject> Root = Parsed->Type == EJson::Object ? Parsed->AsObject() : nullptr;
+				const TArray<TSharedPtr<FJsonValue>>* List = nullptr;
+				if (Parsed->Type == EJson::Array) { if (!AddPoseList(Parsed->AsArray())) { return false; } }
+				else if (Root.IsValid() && Root->TryGetArrayField(TEXT("poses"), List)) { if (!AddPoseList(*List)) { return false; } }
+				else if (!AddPoseList({ Parsed })) { return false; }
+				continue;
+			}
+			if (P.IsValid() && P->HasField(TEXT("bones")))
+			{
+				if (!AddPoseList({ V })) { return false; }
+				continue;
+			}
 			const FString AnimPath = P.IsValid() ? P->GetStringField(TEXT("anim")) : V->AsString();
-			const double Time = P.IsValid() ? OptNum(P, TEXT("time"), 0.0) : 0.0;
-			const UAnimSequence* Anim = VmhAssets::Load<UAnimSequence>(AnimPath);
+			UAnimSequence* Anim = VmhAssets::Load<UAnimSequence>(AnimPath);
 			if (!Anim)
 			{
-				OutError = FString::Printf(TEXT("no AnimSequence at %s (poses take {\"anim\": path, \"time\": seconds})"), *AnimPath);
+				OutError = FString::Printf(TEXT("no AnimSequence at %s (poses take {\"anim\": path, \"time\": s}, {\"file\": dump.json} or {\"bones\": {...}})"), *AnimPath);
 				return false;
 			}
-			FPose Pose;
-			if (!AnimPose(Leader->GetRefSkeleton(), Anim, Time, Pose, OutError))
+			TArray<double> Times;
+			const TArray<TSharedPtr<FJsonValue>>* TimeList = nullptr;
+			if (P.IsValid() && P->TryGetArrayField(TEXT("times"), TimeList))
 			{
-				return false;
+				for (const TSharedPtr<FJsonValue>& T : *TimeList) { Times.Add(T->AsNumber()); }
 			}
-			OutPoses.Add(MoveTemp(Pose));
+			else if (P.IsValid() && OptNum(P, TEXT("stride"), 0.0) > 0.0)
+			{
+				const double Stride = FMath::Max(0.05, OptNum(P, TEXT("stride"), 0.5));
+				for (double T = 0.0; T <= Anim->GetPlayLength() + 1e-6 && Times.Num() < 400; T += Stride) { Times.Add(FMath::Min(T, static_cast<double>(Anim->GetPlayLength()))); }
+			}
+			else
+			{
+				Times.Add(P.IsValid() ? OptNum(P, TEXT("time"), 0.0) : 0.0);
+			}
+			const bool bRuntime = OptStr(P, TEXT("evaluate"), GlobalEvaluate).Equals(TEXT("runtime"), ESearchCase::IgnoreCase);
+			if (bRuntime && !Runtime)
+			{
+				if (!Blueprint)
+				{
+					OutError = TEXT("evaluate \"runtime\" needs the character Blueprint");
+					return false;
+				}
+				Runtime = MakeUnique<VmhPreview::FCharacter>();
+				Runtime->BodyComponentName = OptStr(Options, TEXT("body_component"), TEXT("Body"));
+				if (!Runtime->Spawn(Blueprint, OutError))
+				{
+					OutError = TEXT("runtime pose: ") + OutError;
+					return false;
+				}
+			}
+			for (const double Time : Times)
+			{
+				FPose Pose;
+				if (bRuntime)
+				{
+					if (!Runtime->Pose(Anim, Time, OutError))
+					{
+						return false;
+					}
+					Pose = Runtime->BodyPose(FString::Printf(TEXT("%s @ %.2fs (runtime)"), *Anim->GetName(), Time));
+				}
+				else if (!AnimPose(Leader->GetRefSkeleton(), Anim, Time, Pose, OutError))
+				{
+					return false;
+				}
+				OutPoses.Add(MoveTemp(Pose));
+			}
 		}
 		return true;
 	}
@@ -192,7 +293,13 @@ namespace
 
 	// ------------------------------------------------------------------ leader bone evaluation
 
-	bool LeaderRequired(const USkeletalMesh* Leader, int32 Lod, TSet<int32>& OutRequired, int32& OutLeaderLod, FString& OutError)
+	/**
+	 * The leader bones a garment LOD can rely on. Garment LOD n is drawn while the leader is at LOD n, and the garment's
+	 * LAST LOD also at every lower leader LOD (a one-LOD garment is drawn at body LOD 0, 1 and 2), so the last LOD gets
+	 * the intersection of the leader's RequiredBones over leader LODs n..last. (Clamping to one leader LOD let a one-LOD
+	 * dress streak at body LOD1-2, where the body drops corrective and helper bones: 2026-11-14, issue #3.)
+	 */
+	bool LeaderRequired(const USkeletalMesh* Garment, const USkeletalMesh* Leader, int32 GarmentLod, TSet<int32>& OutRequired, int32& OutFirst, int32& OutLast, FString& OutError)
 	{
 		const FSkeletalMeshRenderData* RenderData = Leader ? Leader->GetResourceForRendering() : nullptr;
 		if (!RenderData || RenderData->LODRenderData.Num() == 0)
@@ -200,10 +307,36 @@ namespace
 			OutError = TEXT("the leader mesh has no render data");
 			return false;
 		}
-		OutLeaderLod = FMath::Clamp(Lod, 0, RenderData->LODRenderData.Num() - 1);
-		for (const FBoneIndexType Bone : RenderData->LODRenderData[OutLeaderLod].RequiredBones)
+		const int32 LeaderLast = RenderData->LODRenderData.Num() - 1;
+		const int32 GarmentLast = Garment->GetLODNum() - 1;
+		auto Range = [LeaderLast, GarmentLast](int32 G, int32& First, int32& Last)
 		{
-			OutRequired.Add(Bone);
+			First = FMath::Clamp(G, 0, LeaderLast);
+			Last = G >= GarmentLast ? LeaderLast : First;
+		};
+		Range(GarmentLod, OutFirst, OutLast);
+		// a LOD generated by reduction from this one (no mesh description of its own) inherits these weights: its
+		// leader LODs count here too (a 4-LOD shoe with generated LOD1-3 is drawn at every body LOD from LOD0's weights)
+		for (int32 G = GarmentLod + 1; G <= GarmentLast; ++G)
+		{
+			const FSkeletalMeshLODInfo* Info = Garment->GetLODInfo(G);
+			if (Info && !Garment->HasMeshDescription(G) && Info->ReductionSettings.BaseLOD == GarmentLod)
+			{
+				int32 F = 0, L = 0;
+				Range(G, F, L);
+				OutFirst = FMath::Min(OutFirst, F);
+				OutLast = FMath::Max(OutLast, L);
+			}
+		}
+		OutRequired.Reset();
+		for (int32 L = OutFirst; L <= OutLast; ++L)
+		{
+			TSet<int32> Lod;
+			for (const FBoneIndexType Bone : RenderData->LODRenderData[L].RequiredBones)
+			{
+				Lod.Add(Bone);
+			}
+			OutRequired = L == OutFirst ? MoveTemp(Lod) : OutRequired.Intersect(Lod);
 		}
 		if (OutRequired.Num() == 0)
 		{
@@ -211,6 +344,11 @@ namespace
 			return false;
 		}
 		return true;
+	}
+
+	FString LodRange(int32 First, int32 Last)
+	{
+		return First == Last ? FString::FromInt(First) : FString::Printf(TEXT("%d-%d"), First, Last);
 	}
 
 	/**
@@ -380,14 +518,46 @@ namespace
 
 TSharedPtr<FJsonObject> UMetaHumanWardrobeService::CheckFollower(const USkeletalMesh* Garment, const USkeletalMesh* Leader, int32 GarmentLod)
 {
+	if (GarmentLod < 0)
+	{
+		// every LOD: totals at the top (what attach_skeletal_mesh_to_blueprint warns on), one report per LOD below
+		TSharedPtr<FJsonObject> All = VmhJson::Obj();
+		TArray<TSharedPtr<FJsonValue>> Lods;
+		double Dead = 0, Missing = 0;
+		TArray<FString> DeadBones, MissingBones;
+		const int32 Num = Garment ? Garment->GetLODNum() : 0;
+		for (int32 L = 0; L < Num; ++L)
+		{
+			const TSharedPtr<FJsonObject> R = CheckFollower(Garment, Leader, L);
+			double D = 0, M = 0;
+			if (R->TryGetNumberField(TEXT("unevaluated_bone_vertices"), D)) { Dead += D; }
+			if (R->TryGetNumberField(TEXT("missing_bone_vertices"), M)) { Missing += M; }
+			const TArray<TSharedPtr<FJsonValue>>* Names = nullptr;
+			if (R->TryGetArrayField(TEXT("unevaluated_bones"), Names)) { for (const TSharedPtr<FJsonValue>& V : *Names) { DeadBones.AddUnique(V->AsString().Left(V->AsString().Find(TEXT(" (")))); } }
+			if (R->TryGetArrayField(TEXT("missing_bones"), Names)) { for (const TSharedPtr<FJsonValue>& V : *Names) { MissingBones.AddUnique(V->AsString().Left(V->AsString().Find(TEXT(" (")))); } }
+			Lods.Add(MakeShared<FJsonValueObject>(R));
+		}
+		if (Num == 0)
+		{
+			All->SetStringField(TEXT("error"), TEXT("no garment or leader mesh"));
+		}
+		All->SetNumberField(TEXT("garment_lods"), Num);
+		All->SetNumberField(TEXT("unevaluated_bone_vertices"), Dead);
+		All->SetArrayField(TEXT("unevaluated_bones"), VmhJson::StringArray(DeadBones));
+		All->SetNumberField(TEXT("missing_bone_vertices"), Missing);
+		All->SetArrayField(TEXT("missing_bones"), VmhJson::StringArray(MissingBones));
+		All->SetArrayField(TEXT("lods"), Lods);
+		return All;
+	}
 	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
 	FMeshDescription Desc;
 	FLodGeom Geom;
 	FString Error;
 	TSet<int32> Required;
-	int32 LeaderLod = 0;
-	if (!Garment || !Leader || !ReadLod(Garment, GarmentLod, Desc, Geom, Error) || !LeaderRequired(Leader, GarmentLod, Required, LeaderLod, Error))
+	int32 LeaderFirst = 0, LeaderLast = 0;
+	if (!Garment || !Leader || !ReadLod(Garment, GarmentLod, Desc, Geom, Error) || !LeaderRequired(Garment, Leader, GarmentLod, Required, LeaderFirst, LeaderLast, Error))
 	{
+		Out->SetNumberField(TEXT("garment_lod"), GarmentLod);
 		Out->SetStringField(TEXT("error"), Error.IsEmpty() ? TEXT("no garment or leader mesh") : Error);
 		return Out;
 	}
@@ -410,12 +580,138 @@ TSharedPtr<FJsonObject> UMetaHumanWardrobeService::CheckFollower(const USkeletal
 		MissingVerts += bMissing ? 1 : 0;
 	}
 	Out->SetNumberField(TEXT("garment_lod"), GarmentLod);
-	Out->SetNumberField(TEXT("leader_lod"), LeaderLod);
+	Out->SetStringField(TEXT("leader_lods"), LodRange(LeaderFirst, LeaderLast));
 	Out->SetNumberField(TEXT("unevaluated_bone_vertices"), DeadVerts);
 	Out->SetArrayField(TEXT("unevaluated_bones"), TopCounts(DeadUse, 12));
 	Out->SetNumberField(TEXT("missing_bone_vertices"), MissingVerts);
 	Out->SetArrayField(TEXT("missing_bones"), TopCounts(MissingUse, 12));
 	return Out;
+}
+
+// =====================================================================================================================
+// describe_skeletal_mesh
+// =====================================================================================================================
+
+FString UMetaHumanWardrobeService::DescribeSkeletalMesh(const FString& MeshPath, const FString& LeaderMeshPath, bool bListAllBones)
+{
+	USkeletalMesh* Mesh = VmhAssets::Load<USkeletalMesh>(MeshPath);
+	if (!Mesh)
+	{
+		return VmhJson::Error(TEXT("MESH_NOT_FOUND"), FString::Printf(TEXT("No skeletal mesh at %s"), *MeshPath));
+	}
+	const USkeletalMesh* Leader = LeaderMeshPath.IsEmpty() ? nullptr : VmhAssets::Load<USkeletalMesh>(LeaderMeshPath);
+	if (!LeaderMeshPath.IsEmpty() && !Leader)
+	{
+		return VmhJson::Error(TEXT("MESH_NOT_FOUND"), FString::Printf(TEXT("No leader skeletal mesh at %s"), *LeaderMeshPath));
+	}
+	const int32 MaxNames = bListAllBones ? MAX_int32 : 40;
+	auto Names = [MaxNames](const TArray<FString>& All) -> TArray<TSharedPtr<FJsonValue>>
+	{
+		TArray<TSharedPtr<FJsonValue>> Out;
+		for (int32 I = 0; I < All.Num() && I < MaxNames; ++I) { Out.Add(MakeShared<FJsonValueString>(All[I])); }
+		if (All.Num() > MaxNames) { Out.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("... %d more (bListAllBones)"), All.Num() - MaxNames))); }
+		return Out;
+	};
+
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	const FReferenceSkeleton& Ref = Mesh->GetRefSkeleton();
+	Out->SetStringField(TEXT("mesh"), Mesh->GetPathName());
+	Out->SetStringField(TEXT("skeleton"), Mesh->GetSkeleton() ? Mesh->GetSkeleton()->GetPathName() : TEXT(""));
+	Out->SetStringField(TEXT("physics_asset"), Mesh->GetPhysicsAsset() ? Mesh->GetPhysicsAsset()->GetPathName() : TEXT(""));
+	Out->SetStringField(TEXT("post_process_anim_blueprint"), Mesh->GetPostProcessAnimBlueprint() ? Mesh->GetPostProcessAnimBlueprint()->GetPathName() : TEXT(""));
+	Out->SetStringField(TEXT("lod_settings"), Mesh->GetLODSettings() ? Mesh->GetLODSettings()->GetPathName() : TEXT(""));
+	Out->SetNumberField(TEXT("bones"), Ref.GetNum());
+	Out->SetNumberField(TEXT("morph_targets"), Mesh->GetMorphTargets().Num());
+	const FBoxSphereBounds Bounds = Mesh->GetImportedBounds();
+	Out->SetStringField(TEXT("bounds_min_cm"), (Bounds.Origin - Bounds.BoxExtent).ToString());
+	Out->SetStringField(TEXT("bounds_max_cm"), (Bounds.Origin + Bounds.BoxExtent).ToString());
+	TArray<FString> Sockets;
+	for (int32 I = 0; I < Mesh->NumSockets(); ++I)
+	{
+		if (const USkeletalMeshSocket* S = Mesh->GetSocketByIndex(I)) { Sockets.Add(S->SocketName.ToString() + TEXT(" -> ") + S->BoneName.ToString()); }
+	}
+	Out->SetArrayField(TEXT("sockets"), VmhJson::StringArray(Sockets));
+	TArray<TSharedPtr<FJsonValue>> Slots;
+	for (int32 I = 0; I < Mesh->GetMaterials().Num(); ++I)
+	{
+		const FSkeletalMaterial& M = Mesh->GetMaterials()[I];
+		TSharedPtr<FJsonObject> S = VmhJson::Obj();
+		S->SetNumberField(TEXT("index"), I);
+		S->SetStringField(TEXT("slot"), M.MaterialSlotName.ToString());
+		S->SetStringField(TEXT("imported_slot"), M.ImportedMaterialSlotName.ToString());
+		S->SetStringField(TEXT("material"), M.MaterialInterface ? M.MaterialInterface->GetPathName() : TEXT(""));
+		Slots.Add(MakeShared<FJsonValueObject>(S));
+	}
+	Out->SetArrayField(TEXT("material_slots"), Slots);
+
+	const FSkeletalMeshRenderData* RenderData = Mesh->GetResourceForRendering();
+	TArray<TSharedPtr<FJsonValue>> Lods;
+	TSet<int32> PrevRequired;
+	for (int32 L = 0; L < Mesh->GetLODNum(); ++L)
+	{
+		TSharedPtr<FJsonObject> R = VmhJson::Obj();
+		R->SetNumberField(TEXT("lod"), L);
+		R->SetBoolField(TEXT("has_mesh_description"), Mesh->HasMeshDescription(L));
+		if (const FSkeletalMeshLODInfo* Info = Mesh->GetLODInfo(L))
+		{
+			R->SetNumberField(TEXT("screen_size"), Info->ScreenSize.Default);
+			R->SetBoolField(TEXT("simplified"), Info->bHasBeenSimplified);
+			TArray<FString> ToRemove;
+			for (const FBoneReference& B : Info->BonesToRemove) { ToRemove.Add(B.BoneName.ToString()); }
+			R->SetArrayField(TEXT("bones_to_remove_setting"), Names(ToRemove));
+		}
+		if (RenderData && RenderData->LODRenderData.IsValidIndex(L))
+		{
+			const FSkeletalMeshLODRenderData& LodData = RenderData->LODRenderData[L];
+			R->SetNumberField(TEXT("vertices"), static_cast<double>(LodData.GetNumVertices()));
+			int32 Triangles = 0;
+			TArray<TSharedPtr<FJsonValue>> Sections;
+			for (const FSkelMeshRenderSection& Section : LodData.RenderSections)
+			{
+				TSharedPtr<FJsonObject> S = VmhJson::Obj();
+				S->SetNumberField(TEXT("material_index"), Section.MaterialIndex);
+				S->SetNumberField(TEXT("triangles"), static_cast<double>(Section.NumTriangles));
+				S->SetNumberField(TEXT("vertices"), static_cast<double>(Section.NumVertices));
+				S->SetBoolField(TEXT("disabled"), Section.bDisabled);
+				Sections.Add(MakeShared<FJsonValueObject>(S));
+				Triangles += static_cast<int32>(Section.NumTriangles);
+			}
+			R->SetNumberField(TEXT("triangles"), Triangles);
+			R->SetArrayField(TEXT("sections"), Sections);
+			TSet<int32> Required;
+			for (const FBoneIndexType B : LodData.RequiredBones) { Required.Add(B); }
+			R->SetNumberField(TEXT("required_bones"), Required.Num());
+			TArray<FString> NotEvaluated, DroppedHere;
+			for (int32 B = 0; B < Ref.GetNum(); ++B)
+			{
+				if (Required.Contains(B)) { continue; }
+				NotEvaluated.Add(Ref.GetBoneName(B).ToString());
+				if (L > 0 && PrevRequired.Contains(B)) { DroppedHere.Add(Ref.GetBoneName(B).ToString()); }
+			}
+			R->SetNumberField(TEXT("bones_not_evaluated"), NotEvaluated.Num());
+			R->SetArrayField(TEXT("bones_not_evaluated_names"), Names(NotEvaluated));
+			if (L > 0)
+			{
+				R->SetArrayField(TEXT("bones_dropped_since_previous_lod"), Names(DroppedHere));
+			}
+			PrevRequired = MoveTemp(Required);
+		}
+		if (Leader)
+		{
+			R->SetObjectField(TEXT("as_follower"), CheckFollower(Mesh, Leader, L));
+		}
+		Lods.Add(MakeShared<FJsonValueObject>(R));
+	}
+	Out->SetNumberField(TEXT("lod_count"), Mesh->GetLODNum());
+	Out->SetArrayField(TEXT("lods"), Lods);
+	if (Leader)
+	{
+		Out->SetStringField(TEXT("leader"), Leader->GetPathName());
+		const FSkeletalMeshRenderData* LeaderData = Leader->GetResourceForRendering();
+		Out->SetNumberField(TEXT("leader_lod_count"), LeaderData ? LeaderData->LODRenderData.Num() : 0);
+		Out->SetStringField(TEXT("hint"), TEXT("as_follower: each LOD against the leader LODs it is drawn with (the last LOD against every remaining one); unevaluated_bone_vertices > 0 streak or spike there: fix_unevaluated_bone_weights on a copy"));
+	}
+	return VmhJson::Ok(Out);
 }
 
 // =====================================================================================================================
@@ -446,8 +742,8 @@ FString UMetaHumanWardrobeService::FixUnevaluatedBoneWeights(const FString& Garm
 		FLodGeom Geom;
 		FString Error;
 		TSet<int32> Required;
-		int32 LeaderLod = 0;
-		if (!ReadLod(Garment, Lod, Desc, Geom, Error) || !LeaderRequired(Leader, Lod, Required, LeaderLod, Error))
+		int32 LeaderFirst = 0, LeaderLast = 0;
+		if (!ReadLod(Garment, Lod, Desc, Geom, Error) || !LeaderRequired(Garment, Leader, Lod, Required, LeaderFirst, LeaderLast, Error))
 		{
 			R->SetStringField(TEXT("skipped"), Error);
 			LodReports.Add(MakeShared<FJsonValueObject>(R));
@@ -492,7 +788,7 @@ FString UMetaHumanWardrobeService::FixUnevaluatedBoneWeights(const FString& Garm
 		}
 		int32 DeadBones = 0;
 		for (const bool B : Dead) { DeadBones += B ? 1 : 0; }
-		R->SetNumberField(TEXT("leader_lod"), LeaderLod);
+		R->SetStringField(TEXT("leader_lods"), LodRange(LeaderFirst, LeaderLast));
 		R->SetNumberField(TEXT("unevaluated_bones_in_skeleton"), DeadBones);
 		R->SetNumberField(TEXT("vertices"), Geom.Weights.Num());
 		R->SetNumberField(TEXT("vertices_fixed"), Fixed);
@@ -1592,5 +1888,386 @@ FString UMetaHumanWardrobeService::FillGroomLods(const FString& GroomPath, bool 
 	Out->SetArrayField(TEXT("changes"), Changes);
 	Out->SetArrayField(TEXT("gaps"), Gaps);
 	Out->SetStringField(TEXT("hint"), Changes.Num() == 0 ? TEXT("every LOD already has geometry") : TEXT("the bindings rebuild on their own (about a minute; the log prints Waiting for groom bindings); save the groom"));
+	return VmhJson::Ok(Out);
+}
+
+// =====================================================================================================================
+// post_build_fixup
+// =====================================================================================================================
+
+namespace
+{
+	/** The groom components of a Blueprint's construction script. */
+	struct FGroomUse { FString Component; UGroomComponent* Template = nullptr; };
+
+	TArray<FGroomUse> GroomComponents(UBlueprint* Blueprint)
+	{
+		TArray<FGroomUse> Out;
+		if (USimpleConstructionScript* SCS = Blueprint ? Blueprint->SimpleConstructionScript : nullptr)
+		{
+			for (USCS_Node* Node : SCS->GetAllNodes())
+			{
+				if (UGroomComponent* G = Node ? Cast<UGroomComponent>(Node->ComponentTemplate) : nullptr)
+				{
+					Out.Add({ Node->GetVariableName().ToString(), G });
+				}
+			}
+		}
+		return Out;
+	}
+}
+
+FString UMetaHumanWardrobeService::PostBuildFixup(const FString& BlueprintPath, const FString& OptionsJson, bool bDryRun)
+{
+	UBlueprint* Blueprint = VmhAssets::Load<UBlueprint>(BlueprintPath);
+	if (!Blueprint || !Blueprint->SimpleConstructionScript)
+	{
+		return VmhJson::Error(TEXT("BLUEPRINT_NOT_FOUND"), FString::Printf(TEXT("No Blueprint with a construction script at %s"), *BlueprintPath));
+	}
+	FString Error;
+	const TSharedPtr<FJsonObject> Options = VmhJson::Parse(OptionsJson, Error);
+	if (!Options.IsValid())
+	{
+		return VmhJson::Error(TEXT("BAD_OPTIONS"), Error);
+	}
+	FString Package, Name;
+	VmhAssets::SplitAssetPath(Blueprint->GetPathName(), Package, Name);
+	const FString Folder = OptStr(Options, TEXT("folder"), Package);
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	Out->SetStringField(TEXT("blueprint"), Blueprint->GetPathName());
+	Out->SetStringField(TEXT("folder"), Folder);
+	Out->SetBoolField(TEXT("dry_run"), bDryRun);
+	TArray<FString> Dirty, Notes;
+
+	// 1. groom LODs: every groom the Blueprint draws (hidden LODs made visible: the brows vanish from LOD4 otherwise)
+	if (OptBool(Options, TEXT("groom_lods"), true))
+	{
+		const bool bShowHidden = OptBool(Options, TEXT("show_hidden_groom_lods"), true);
+		TArray<TSharedPtr<FJsonValue>> Grooms;
+		TSet<UGroomAsset*> Done;
+		for (const FGroomUse& G : GroomComponents(Blueprint))
+		{
+			UGroomAsset* Asset = G.Template->GroomAsset;
+			if (!Asset || Done.Contains(Asset))
+			{
+				continue;
+			}
+			Done.Add(Asset);
+			TSharedPtr<FJsonObject> R = VmhJson::Obj();
+			R->SetStringField(TEXT("component"), G.Component);
+			R->SetStringField(TEXT("groom"), Asset->GetPathName());
+			if (!IsEditablePath(Asset->GetPathName()))
+			{
+				R->SetStringField(TEXT("skipped"), TEXT("outside /Game or in /Game/Fab: not a build output"));
+			}
+			else
+			{
+				FString ParseError;
+				const TSharedPtr<FJsonObject> Fill = VmhJson::Parse(FillGroomLods(Asset->GetPathName(), bShowHidden, bDryRun), ParseError);
+				const TArray<TSharedPtr<FJsonValue>>* Changes = nullptr;
+				const TArray<TSharedPtr<FJsonValue>>* Gaps = nullptr;
+				if (Fill.IsValid() && Fill->TryGetArrayField(TEXT("changes"), Changes)) { R->SetArrayField(TEXT("changes"), *Changes); }
+				if (Fill.IsValid() && Fill->TryGetArrayField(TEXT("gaps"), Gaps)) { R->SetArrayField(TEXT("gaps"), *Gaps); }
+				if (!bDryRun && Changes && Changes->Num() > 0) { Dirty.Add(Asset->GetPathName()); }
+			}
+			Grooms.Add(MakeShared<FJsonValueObject>(R));
+		}
+		Out->SetArrayField(TEXT("grooms"), Grooms);
+	}
+
+	// 2. brow opacity: the build's Facial_Hair instance drew pale brows at OpacityNear/Far 0.8/0.4 (fixed with 2.0)
+	{
+		const double BrowOpacity = OptNum(Options, TEXT("brow_opacity"), 0.0);
+		const FString BrowComponent = OptStr(Options, TEXT("brow_component"), TEXT("Eyebrows"));
+		TArray<TSharedPtr<FJsonValue>> Brows;
+		TSet<UMaterialInstanceConstant*> Seen;
+		for (const FGroomUse& G : GroomComponents(Blueprint))
+		{
+			if (!G.Component.Contains(BrowComponent))
+			{
+				continue;
+			}
+			TArray<UMaterialInterface*> Materials;
+			for (UMaterialInterface* M : G.Template->OverrideMaterials) { Materials.Add(M); }
+			if (G.Template->GroomAsset)
+			{
+				for (const FHairGroupsMaterial& M : G.Template->GroomAsset->GetHairGroupsMaterials()) { Materials.Add(M.Material); }
+			}
+			for (UMaterialInterface* M : Materials)
+			{
+				UMaterialInstanceConstant* MIC = Cast<UMaterialInstanceConstant>(M);
+				if (!MIC || Seen.Contains(MIC))
+				{
+					continue;
+				}
+				Seen.Add(MIC);
+				float Near = 0.f, Far = 0.f;
+				const bool bHasNear = MIC->GetScalarParameterValue(FHashedMaterialParameterInfo(TEXT("OpacityNear")), Near);
+				const bool bHasFar = MIC->GetScalarParameterValue(FHashedMaterialParameterInfo(TEXT("OpacityFar")), Far);
+				if (!bHasNear && !bHasFar)
+				{
+					continue;
+				}
+				TSharedPtr<FJsonObject> R = VmhJson::Obj();
+				R->SetStringField(TEXT("material"), MIC->GetPathName());
+				R->SetNumberField(TEXT("opacity_near"), Near);
+				R->SetNumberField(TEXT("opacity_far"), Far);
+				if (BrowOpacity > 0.0 && IsEditablePath(MIC->GetPathName()) && (!FMath::IsNearlyEqual(Near, static_cast<float>(BrowOpacity)) || !FMath::IsNearlyEqual(Far, static_cast<float>(BrowOpacity))))
+				{
+					R->SetNumberField(TEXT("set_to"), BrowOpacity);
+					if (!bDryRun)
+					{
+						UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MIC, TEXT("OpacityNear"), static_cast<float>(BrowOpacity));
+						UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MIC, TEXT("OpacityFar"), static_cast<float>(BrowOpacity));
+						UMaterialEditingLibrary::UpdateMaterialInstance(MIC);
+						MIC->MarkPackageDirty();
+						Dirty.Add(MIC->GetPathName());
+					}
+				}
+				Brows.Add(MakeShared<FJsonValueObject>(R));
+			}
+		}
+		Out->SetArrayField(TEXT("brow_materials"), Brows);
+	}
+
+	// 3. texture caps, per asset (a device-profile group cap does not reach virtual textures). Never flips
+	//    VirtualTextureStreaming: that broke the materials ("Sampler type is Virtual Color, should be Color").
+	{
+		TArray<TPair<FString, int32>> Caps;
+		const TSharedPtr<FJsonObject>* CapsObj = nullptr;
+		if (Options->TryGetObjectField(TEXT("texture_caps"), CapsObj))
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& C : (*CapsObj)->Values) { Caps.Emplace(C.Key, static_cast<int32>(C.Value->AsNumber())); }
+		}
+		else
+		{
+			Caps.Emplace(TEXT("T_Body_*_VT"), 1024);
+			Caps.Emplace(TEXT("T_Head_*_VT"), 2048);
+		}
+		TArray<TSharedPtr<FJsonValue>> Textures;
+		if (Caps.Num() > 0)
+		{
+			for (const FString& Path : VmhAssets::FindAssetsOfClass(TEXT("/Script/Engine.Texture"), Folder))
+			{
+				FString P, TexName;
+				VmhAssets::SplitAssetPath(Path, P, TexName);
+				const TPair<FString, int32>* Cap = Caps.FindByPredicate([&TexName](const TPair<FString, int32>& C) { return TexName.MatchesWildcard(C.Key); });
+				if (!Cap)
+				{
+					continue;
+				}
+				UTexture* Texture = VmhAssets::Load<UTexture>(Path);
+				if (!Texture || !IsEditablePath(Texture->GetPathName()))
+				{
+					continue;
+				}
+				TSharedPtr<FJsonObject> R = VmhJson::Obj();
+				R->SetStringField(TEXT("texture"), Texture->GetPathName());
+				R->SetNumberField(TEXT("max_texture_size_before"), Texture->MaxTextureSize);
+				R->SetNumberField(TEXT("cap"), Cap->Value);
+				R->SetBoolField(TEXT("virtual_texture"), Texture->VirtualTextureStreaming != 0);
+				if (Texture->MaxTextureSize != Cap->Value && !bDryRun)
+				{
+					Texture->Modify();
+					Texture->MaxTextureSize = Cap->Value;
+					FPropertyChangedEvent Event(FindFProperty<FProperty>(UTexture::StaticClass(), GET_MEMBER_NAME_CHECKED(UTexture, MaxTextureSize)), EPropertyChangeType::ValueSet);
+					Texture->PostEditChangeProperty(Event);
+					Texture->MarkPackageDirty();
+					Dirty.Add(Texture->GetPathName());
+				}
+				Textures.Add(MakeShared<FJsonValueObject>(R));
+			}
+		}
+		Out->SetArrayField(TEXT("textures"), Textures);
+	}
+
+	// 4. the Face component's anim class (a rebuild puts the plugin's copy-pose-only ABP_Face back)
+	{
+		const FString FaceAnimClass = OptStr(Options, TEXT("face_anim_class"), TEXT(""));
+		FComp Face;
+		FString FaceError;
+		if (FindComp(Blueprint, OptStr(Options, TEXT("face_component"), TEXT("Face")), Face, FaceError))
+		{
+			Out->SetStringField(TEXT("face_anim_class_before"), Face.Template->AnimClass ? Face.Template->AnimClass->GetPathName() : TEXT(""));
+			if (!FaceAnimClass.IsEmpty())
+			{
+				UClass* Class = nullptr;
+				if (UBlueprint* AnimBlueprint = VmhAssets::Load<UBlueprint>(FaceAnimClass)) { Class = AnimBlueprint->GeneratedClass; }
+				if (!Class) { Class = LoadObject<UClass>(nullptr, *FaceAnimClass); }
+				if (!Class || !Class->IsChildOf(UAnimInstance::StaticClass()))
+				{
+					return VmhJson::Error(TEXT("ANIM_CLASS_NOT_FOUND"), FString::Printf(TEXT("%s is not an Animation Blueprint or AnimInstance class"), *FaceAnimClass), Out);
+				}
+				if (Face.Template->AnimClass != Class && !bDryRun)
+				{
+					Face.Template->Modify();
+					Face.Template->SetAnimInstanceClass(Class);
+					FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+					FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection);
+					Blueprint->MarkPackageDirty();
+					Dirty.Add(Blueprint->GetPathName());
+				}
+				Out->SetStringField(TEXT("face_anim_class"), Class->GetPathName());
+			}
+		}
+		else
+		{
+			Notes.Add(FaceError);
+		}
+	}
+
+	Out->SetArrayField(TEXT("dirty"), VmhJson::StringArray(Dirty));
+	Out->SetArrayField(TEXT("notes"), VmhJson::StringArray(Notes));
+	Out->SetStringField(TEXT("hint"), bDryRun
+		? TEXT("dry run: nothing changed; run again with bDryRun false")
+		: TEXT("save the dirty packages by name; groom bindings rebuild on their own (about a minute). Asset-level fits (hide/push body) are not redone here: re-run them on the fresh body"));
+	return VmhJson::Ok(Out);
+}
+
+// =====================================================================================================================
+// audit_placed_instances
+// =====================================================================================================================
+
+FString UMetaHumanWardrobeService::AuditPlacedInstances(const FString& BlueprintPath, bool bClearOverrides, const FString& MapPath)
+{
+	UBlueprint* Blueprint = VmhAssets::Load<UBlueprint>(BlueprintPath);
+	if (!Blueprint || !Blueprint->GeneratedClass)
+	{
+		return VmhJson::Error(TEXT("BLUEPRINT_NOT_FOUND"), FString::Printf(TEXT("No compiled Blueprint at %s"), *BlueprintPath));
+	}
+	if (!MapPath.IsEmpty() && !UEditorLoadingAndSavingUtils::LoadMap(MapPath))
+	{
+		return VmhJson::Error(TEXT("MAP_NOT_LOADED"), FString::Printf(TEXT("could not load %s (save or discard unsaved level changes first)"), *MapPath));
+	}
+	UWorld* World = VmhAssets::EditorWorld();
+	if (!World)
+	{
+		return VmhJson::Error(TEXT("NO_WORLD"), TEXT("no editor world"));
+	}
+	static const TSet<FName> Placement = { TEXT("RelativeLocation"), TEXT("RelativeRotation"), TEXT("RelativeScale3D") };
+	// the reference is a FRESH SPAWN of the class in a private world, not the component templates: the construction
+	// script sets values of its own (LOD mapping, asset user data) that are not instance overrides
+	FPreviewScene Reference(FPreviewScene::ConstructionValues().SetCreatePhysicsScene(false));
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.ObjectFlags = RF_Transient;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* Fresh = Reference.GetWorld() ? Reference.GetWorld()->SpawnActor<AActor>(Blueprint->GeneratedClass, FTransform::Identity, SpawnParams) : nullptr;
+	TMap<FName, UActorComponent*> FreshComps;
+	if (Fresh)
+	{
+		for (UActorComponent* C : Fresh->GetComponents()) { if (C) { FreshComps.Add(C->GetFName(), C); } }
+	}
+	TArray<TSharedPtr<FJsonValue>> Actors;
+	int32 TotalOverrides = 0, Cleared = 0;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!Actor || !Actor->GetClass()->IsChildOf(Blueprint->GeneratedClass))
+		{
+			continue;
+		}
+		TSharedPtr<FJsonObject> A = VmhJson::Obj();
+		A->SetStringField(TEXT("actor"), Actor->GetActorLabel());
+		A->SetStringField(TEXT("level"), Actor->GetLevel() ? Actor->GetLevel()->GetOutermost()->GetName() : TEXT(""));
+		TArray<TSharedPtr<FJsonValue>> Overrides;
+		TArray<FString> InstanceOnly;
+		bool bChanged = false;
+		for (UActorComponent* Comp : Actor->GetComponents())
+		{
+			if (!Comp)
+			{
+				continue;
+			}
+			UActorComponent* const* FreshComp = FreshComps.Find(Comp->GetFName());
+			const UObject* Archetype = Comp->GetArchetype();
+			if (!FreshComp || !Archetype || Comp->CreationMethod == EComponentCreationMethod::Instance)
+			{
+				InstanceOnly.Add(Comp->GetName());
+				continue;
+			}
+			const UObject* Reference0 = *FreshComp;
+			const bool bRoot = Comp == Actor->GetRootComponent();
+			for (TFieldIterator<FProperty> P(Comp->GetClass()); P; ++P)
+			{
+				FProperty* Prop = *P;
+				// editable or Blueprint-visible (SkinnedAsset is only the latter), never transient, not the deprecated
+				// SkeletalMesh alias of SkinnedAsset, and not the root's placement
+				if (!Prop->HasAnyPropertyFlags(CPF_Edit | CPF_BlueprintVisible) || Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient | CPF_Deprecated)
+					|| Prop->IsA<FMulticastDelegateProperty>() || Prop->IsA<FDelegateProperty>()
+					|| (bRoot && Placement.Contains(Prop->GetFName())) || Prop->GetFName() == TEXT("SkeletalMesh")
+					|| !Reference0->IsA(Prop->GetOwnerClass()) || !Archetype->IsA(Prop->GetOwnerClass()))
+				{
+					continue;
+				}
+				if (Prop->Identical_InContainer(Comp, Reference0, 0, PPF_DeepComparison))
+				{
+					continue;
+				}
+				FString Instance, Class;
+				Prop->ExportText_InContainer(0, Instance, Comp, nullptr, Comp, PPF_None);
+				Prop->ExportText_InContainer(0, Class, Reference0, nullptr, const_cast<UObject*>(Reference0), PPF_None);
+				if (Instance == Class)
+				{
+					continue; // instanced subobjects of two worlds: same values, different objects
+				}
+				TSharedPtr<FJsonObject> O = VmhJson::Obj();
+				O->SetStringField(TEXT("component"), Comp->GetName());
+				O->SetStringField(TEXT("property"), Prop->GetName());
+				O->SetStringField(TEXT("instance"), Instance.Left(300));
+				O->SetStringField(TEXT("blueprint"), Class.Left(300));
+				++TotalOverrides;
+				if (bClearOverrides)
+				{
+					// back to the template's value (never a fresh-world object); mesh assets through their setters
+					Comp->Modify();
+					if (USkinnedMeshComponent* Skinned = Cast<USkinnedMeshComponent>(Comp); Skinned && Prop->GetFName() == TEXT("SkinnedAsset"))
+					{
+						Skinned->SetSkinnedAssetAndUpdate(CastChecked<USkinnedMeshComponent>(Archetype)->GetSkinnedAsset(), false);
+					}
+					else if (Prop->HasAnyPropertyFlags(CPF_InstancedReference | CPF_ContainsInstancedReference))
+					{
+						O->SetStringField(TEXT("not_cleared"), TEXT("instanced subobject: reset it in the Details panel"));
+						Overrides.Add(MakeShared<FJsonValueObject>(O));
+						continue;
+					}
+					else
+					{
+						Comp->PreEditChange(Prop);
+						Prop->CopyCompleteValue_InContainer(Comp, Archetype);
+						FPropertyChangedEvent Event(Prop, EPropertyChangeType::ValueSet);
+						Comp->PostEditChangeProperty(Event);
+					}
+					O->SetBoolField(TEXT("cleared"), true);
+					++Cleared;
+					bChanged = true;
+				}
+				Overrides.Add(MakeShared<FJsonValueObject>(O));
+			}
+		}
+		if (bChanged)
+		{
+			Actor->RerunConstructionScripts();
+			Actor->MarkPackageDirty();
+		}
+		A->SetArrayField(TEXT("overrides"), Overrides);
+		A->SetArrayField(TEXT("instance_components"), VmhJson::StringArray(InstanceOnly));
+		Actors.Add(MakeShared<FJsonValueObject>(A));
+	}
+	if (Fresh && Reference.GetWorld())
+	{
+		Reference.GetWorld()->DestroyActor(Fresh);
+	}
+	TSharedPtr<FJsonObject> Out = VmhJson::Obj();
+	Out->SetStringField(TEXT("blueprint"), Blueprint->GetPathName());
+	Out->SetStringField(TEXT("world"), World->GetOutermost()->GetName());
+	Out->SetBoolField(TEXT("compared_with_fresh_spawn"), Fresh != nullptr);
+	Out->SetNumberField(TEXT("instances"), Actors.Num());
+	Out->SetNumberField(TEXT("overrides"), TotalOverrides);
+	Out->SetNumberField(TEXT("cleared"), Cleared);
+	Out->SetArrayField(TEXT("actors"), Actors);
+	Out->SetStringField(TEXT("hint"), Actors.Num() == 0
+		? TEXT("no instance of this Blueprint in the open level: pass MapPath, or open the level the game uses")
+		: bClearOverrides ? TEXT("save the level (and its external actor packages) to keep the cleared values")
+		                  : TEXT("an override of a mesh, material or anim class hides every Blueprint fix from that actor: clear it (bClearOverrides) unless it is meant"));
 	return VmhJson::Ok(Out);
 }
