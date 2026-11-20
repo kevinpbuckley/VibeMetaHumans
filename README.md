@@ -57,6 +57,14 @@ Every tool returns a JSON string: `{"success": true, ...}` or
 4. Verify in the editor console: `VibeMetaHumans.ListToolsets` (expect 7 toolsets) and from the
    agent: `unreal.MetaHumanSetupService.get_status()`.
 
+With Nix (NixOS included), the optional `flake.nix` builds the plugin in an FHS environment against an
+engine you unpacked yourself; Unreal is not packaged:
+```bash
+cd Plugins/VibeMetaHumans
+UE_ENGINE_ROOT=/path/to/UE5 nix run . -- /tmp/VibeMetaHumans-Linux   # RunUAT BuildPlugin into that folder
+nix run .#shell                                                      # a shell for BuildAndLaunchGame.sh or the editor
+```
+
 Skill packs under `Skills/` are discovered natively by UE 5.9 (`<Plugin>/Skills/**/SKILL.md`) and
 served through `ToolsetRegistry.AgentSkillToolset` → `ListSkills` / `GetSkills` as
 `/Skills/VibeMetaHumans/<pack>`, the same way VibeUE's are. The engine re-reads the files on every
