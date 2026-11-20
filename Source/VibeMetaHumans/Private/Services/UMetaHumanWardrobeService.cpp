@@ -2106,7 +2106,7 @@ FString UMetaHumanWardrobeService::PostBuildFixup(const FString& BlueprintPath, 
 		const TSharedPtr<FJsonObject>* CapsObj = nullptr;
 		if (Options->TryGetObjectField(TEXT("texture_caps"), CapsObj))
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& C : (*CapsObj)->Values) { Caps.Emplace(C.Key, static_cast<int32>(C.Value->AsNumber())); }
+			for (const auto& C : (*CapsObj)->Values) { Caps.Emplace(C.Key, static_cast<int32>(C.Value->AsNumber())); }
 		}
 		TArray<TSharedPtr<FJsonValue>> Textures;
 		if (Caps.Num() > 0)

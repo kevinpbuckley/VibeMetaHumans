@@ -123,9 +123,10 @@ namespace VmhBlueprintSnapshot
 			{
 				return;
 			}
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : Recorded->Values)
+			for (const auto& Entry : Recorded->Values)
 			{
-				FString Name = Entry.Key;
+				const FString Key = *Entry.Key; // FJsonObject keys are UE::FSharedString since 5.8
+				FString Name = Key;
 				int32 Index = 0;
 				int32 Bracket = INDEX_NONE;
 				if (Name.FindChar(TEXT('['), Bracket))
@@ -133,14 +134,14 @@ namespace VmhBlueprintSnapshot
 					Index = FCString::Atoi(*Name.Mid(Bracket + 1));
 					Name = Name.Left(Bracket);
 				}
-				const FString Label = Component.IsEmpty() ? Entry.Key : Component + TEXT(".") + Entry.Key;
+				const FString Label = Component.IsEmpty() ? Key : Component + TEXT(".") + Key;
 				// SkeletalMesh is the deprecated alias of SkinnedAsset and is recorded beside it: one entry restores
 				// both, so a skip pattern on SkinnedAsset is not undone by the alias
 				if (Name == TEXT("SkeletalMesh") && Object->IsA<USkinnedMeshComponent>() && Recorded->HasField(TEXT("SkinnedAsset")))
 				{
 					continue;
 				}
-				if (Skipped(Options, Component, Entry.Key))
+				if (Skipped(Options, Component, Key))
 				{
 					SkippedOut.Add(MakeShared<FJsonValueString>(Label));
 					continue;
