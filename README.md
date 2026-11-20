@@ -53,7 +53,10 @@ Every tool returns a JSON string: `{"success": true, ...}` or
    `{ "Name": "VibeMetaHumans", "Enabled": true, "TargetAllowList": ["Editor"] }` to the
    project's `.uproject`, and build the editor target (in Proteus: `BuildAndLaunchGame.ps1`, which is
    also copied here). The plugin is `EnabledByDefault: false` so an unbuilt checkout never
-   triggers the "missing modules" dialog.
+   triggers the "missing modules" dialog. On Linux or macOS run
+   `Plugins/VibeMetaHumans/BuildAndLaunchGame.sh --engine /path/to/UE5`; it also builds a
+   Blueprint-only project (through the engine's `UnrealEditor` target), and asks before closing a
+   running editor of the project (`--stop-editor` gives that consent up front, e.g. for an agent).
 4. Verify in the editor console: `VibeMetaHumans.ListToolsets` (expect 7 toolsets) and from the
    agent: `unreal.MetaHumanSetupService.get_status()`.
 
