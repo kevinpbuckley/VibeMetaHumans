@@ -1042,21 +1042,22 @@ FString UMetaHumanCharacterService::SetBodyConstraints(const FString& CharacterP
 	TArray<FString> Applied;
 	TArray<FString> Unknown;
 	TSet<FString> Named; // the measurements this call names, plus Height: only these end up active
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Values->Values)
+	for (const auto& Pair : Values->Values)
 	{
-		FMetaHumanCharacterBodyConstraint* Found = Constraints.FindByPredicate([&Pair](const FMetaHumanCharacterBodyConstraint& C)
+		const FString Key = *Pair.Key; // FJsonObject keys are UE::FSharedString since 5.8
+		FMetaHumanCharacterBodyConstraint* Found = Constraints.FindByPredicate([&Key](const FMetaHumanCharacterBodyConstraint& C)
 		{
-			return C.Name.ToString().Equals(Pair.Key, ESearchCase::IgnoreCase);
+			return C.Name.ToString().Equals(Key, ESearchCase::IgnoreCase);
 		});
 		if (!Found)
 		{
-			Unknown.Add(Pair.Key);
+			Unknown.Add(Key);
 			continue;
 		}
 		double Value = 0.0;
 		if (!Pair.Value->TryGetNumber(Value))
 		{
-			Unknown.Add(Pair.Key + TEXT(" (not a number)"));
+			Unknown.Add(Key + TEXT(" (not a number)"));
 			continue;
 		}
 		Named.Add(Found->Name.ToString());
@@ -1198,23 +1199,24 @@ FString UMetaHumanCharacterService::MoveFaceLandmarks(const FString& CharacterPa
 
 	TMap<int32, FVector> TargetAbs;
 	TArray<FString> BadIndex, EarRefused;
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Targets->Values)
+	for (const auto& Pair : Targets->Values)
 	{
-		const int32 Idx = FCString::Atoi(*Pair.Key);
+		const FString Key = *Pair.Key; // FJsonObject keys are UE::FSharedString since 5.8
+		const int32 Idx = FCString::Atoi(*Key);
 		const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
 		if (!L0.IsValidIndex(Idx))
 		{
-			BadIndex.Add(Pair.Key + TEXT(" (out of range)"));
+			BadIndex.Add(Key + TEXT(" (out of range)"));
 			continue;
 		}
 		if (!Pair.Value->TryGetArray(Arr) || Arr->Num() != 3)
 		{
-			BadIndex.Add(Pair.Key + TEXT(" (expected [dx,dy,dz])"));
+			BadIndex.Add(Key + TEXT(" (expected [dx,dy,dz])"));
 			continue;
 		}
 		if (Ears.Contains(Idx) && !bAllowEars)
 		{
-			EarRefused.Add(Pair.Key);
+			EarRefused.Add(Key);
 			continue;
 		}
 		const FVector V((*Arr)[0]->AsNumber(), (*Arr)[1]->AsNumber(), (*Arr)[2]->AsNumber());
@@ -1835,9 +1837,9 @@ FString UMetaHumanCharacterService::SetWardrobeItemParameters(const FString& Cha
 	{
 		const UPropertyBag* BagStruct = Bag.GetPropertyBagStruct();
 		void* BagMemory = Bag.GetMutableValue().GetMemory();
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Patch->Values)
+		for (const auto& Pair : Patch->Values)
 		{
-			FProperty* Prop = VmhJson::FindPropertyLoose(BagStruct, Pair.Key);
+			FProperty* Prop = VmhJson::FindPropertyLoose(BagStruct, *Pair.Key);
 			if (!Prop)
 			{
 				return VmhJson::Error(TEXT("UNKNOWN_PARAMETER"), FString::Printf(TEXT("%s has no parameter '%s'. Parameters: %s"),
