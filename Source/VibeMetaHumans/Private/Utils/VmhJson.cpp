@@ -70,7 +70,7 @@ namespace VmhJson
 		Out->SetBoolField(TEXT("success"), true);
 		if (Data.IsValid())
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Data->Values)
+			for (const auto& Pair : Data->Values)
 			{
 				Out->SetField(Pair.Key, Pair.Value);
 			}
@@ -86,7 +86,7 @@ namespace VmhJson
 		Out->SetStringField(TEXT("error"), Message);
 		if (Extra.IsValid())
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Extra->Values)
+			for (const auto& Pair : Extra->Values)
 			{
 				Out->SetField(Pair.Key, Pair.Value);
 			}
@@ -207,9 +207,9 @@ namespace VmhJson
 			return true;
 		}
 		bool bModified = false;
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Patch->Values)
+		for (const auto& Pair : Patch->Values)
 		{
-			FProperty* Prop = FindPropertyLoose(Object->GetClass(), Pair.Key);
+			FProperty* Prop = FindPropertyLoose(Object->GetClass(), *Pair.Key);
 			if (!Prop)
 			{
 				OutError = FString::Printf(TEXT("%s has no property named '%s'"), *Object->GetClass()->GetName(), *Pair.Key);
@@ -385,17 +385,17 @@ namespace VmhJson
 		bool bOk = true;
 		if (Args.IsValid() && Args->Values.Num() > 0)
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Args->Values)
+			for (const auto& Pair : Args->Values)
 			{
 				FProperty* Prop = nullptr;
-				if (Pair.Key.IsNumeric())
+				if (FCString::IsNumeric(*Pair.Key))
 				{
 					const int32 Index = FCString::Atoi(*Pair.Key);
 					Prop = InputParms.IsValidIndex(Index) ? InputParms[Index] : nullptr;
 				}
 				else
 				{
-					Prop = FindPropertyLoose(Function, Pair.Key);
+					Prop = FindPropertyLoose(Function, *Pair.Key);
 				}
 				if (!Prop || !Prop->HasAnyPropertyFlags(CPF_Parm) || Prop->HasAnyPropertyFlags(CPF_ReturnParm))
 				{

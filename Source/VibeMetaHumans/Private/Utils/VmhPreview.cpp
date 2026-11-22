@@ -368,7 +368,7 @@ namespace VmhPreview
 			return false;
 		}
 		Json->TryGetStringField(TEXT("label"), OutPose.Label);
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& B : (*Bones)->Values)
+		for (const auto& B : (*Bones)->Values)
 		{
 			const TArray<TSharedPtr<FJsonValue>>& V = B.Value->AsArray();
 			if (V.Num() < 7)
